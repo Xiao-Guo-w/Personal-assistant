@@ -25,25 +25,29 @@ from langchain_core.messages import (
 from .config import settings
 from .memory import get_user_memories
 
-# tiktoken 编码器：gpt-4o-mini 用 cl100k_base
+# Agnes 未公开 tokenizer，cl100k_base 只做近似计数。
+# 加安全系数，宁可提前裁剪，也不要超过 Agnes 真实上下文。
 _encoder = tiktoken.get_encoding("cl100k_base")
+_TOKEN_SAFETY_FACTOR = 1.15
 
 
 def _token_counter(messages: list[BaseMessage]) -> int:
     """
-    精确计数 token 数。
+    近似计数 token 数。
 
     trim_messages 会调用这个函数，超过 max_tokens 就裁掉最老的消息。
-    用 tiktoken 而不是字符数估算，避免中英文混排时估算偏差。
+    Agnes 未公开 tokenizer，所以用 cl100k_base + 安全系数。
     """
     total = 0
     for m in messages:
         content = m.content if isinstance(m.content, str) else str(m.content)
         total += len(_encoder.encode(content))
-        # 工具调用也会占用 token，粗略加个权重
+
+        # 工具调用也会占用 token，给高一点权重
         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None):
-            total += 50 * len(m.tool_calls)
-    return total
+            total += 80 * len(m.tool_calls)
+
+    return int(total * _TOKEN_SAFETY_FACTOR)
 
 
 # 全局 trimmer：一次构造，多次复用
