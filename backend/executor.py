@@ -155,7 +155,10 @@ async def execute_with_retry(
     if idempotency_key:
         cached = await _cache_get(idempotency_key)
         if cached is not None:
-            return cached
+            # 幂等命中：复用上次结果，同样要留痕并标记（见上面几个特判分支）
+            flagged = {**cached, "deduplicated": True}
+            await _audit(user_id, session_id, tool_name, args, flagged, "cached")
+            return flagged
 
     last_err: Exception | None = None
     for i in range(max_retries):
@@ -194,7 +197,11 @@ async def _execute_notion_tool(
     if idempotency_key:
         cached = await _cache_get(idempotency_key)
         if cached is not None:
-            return cached
+            # 幂等命中：这次并没有真正调用 Notion，必须留痕并标记，
+            # 否则前端会显示"已创建"，用户以为写进去了（实际是重复请求被跳过）
+            flagged = {**cached, "deduplicated": True}
+            await _audit(user_id, session_id, tool_name, args, flagged, "cached")
+            return flagged
 
     last_err: Exception | None = None
     for i in range(max_retries):
@@ -267,7 +274,11 @@ async def _execute_email_tool(
     if idempotency_key:
         cached = await _cache_get(idempotency_key)
         if cached is not None:
-            return cached
+            # 幂等命中：这次没有真的发信，必须留痕并标记，
+            # 否则前端显示"已发送"，用户以为发出去了（实际是重复请求被跳过）
+            flagged = {**cached, "deduplicated": True}
+            await _audit(user_id, session_id, tool_name, args, flagged, "cached")
+            return flagged
 
     last_err: Exception | None = None
     for i in range(max_retries):
@@ -322,7 +333,10 @@ async def _execute_calendar_tool(
     if idempotency_key:
         cached = await _cache_get(idempotency_key)
         if cached is not None:
-            return cached
+            # 幂等命中：这次没有真的调用飞书，留痕 + 标记，避免"看起来已创建"
+            flagged = {**cached, "deduplicated": True}
+            await _audit(user_id, session_id, tool_name, args, flagged, "cached")
+            return flagged
 
     last_err: Exception | None = None
     for i in range(max_retries):

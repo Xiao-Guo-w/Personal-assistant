@@ -11,14 +11,14 @@ import json
 from datetime import datetime, timezone
 
 from langchain_core.messages import (
-    AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage,
+    AIMessage, BaseMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage,
 )
 
 from .config import settings
 from .context import (
     SUMMARY_PROMPT, build_system_msg, compact_tool_result, trim_history,
 )
-from .executor import execute_with_retry, make_idempotency_key
+from .executor import _audit, execute_with_retry, make_idempotency_key
 from .llm import get_llm
 from .state import AgentState
 from .tools import ALL_TOOLS, get_tool_meta
@@ -30,6 +30,101 @@ _llm_with_tools = _llm.bind_tools(ALL_TOOLS)
 
 CONFIRM_WORDS = {"确认", "确定", "是", "好", "ok", "yes", "y"}
 CANCEL_WORDS = {"取消", "算了", "不用", "no", "n", "cancel"}
+
+
+# ============================================================
+# 平台生成消息的标记 + "演戏"拦截
+# ============================================================
+#
+# 背景（真实事故）：确认文案和执行结果原本都以普通助手消息写进历史，
+# 模型看得多了就开始自己模仿——先写"即将…回复确认或取消"，用户回"确认"后
+# 再写"✅ 邮件已发送"，但一次工具都没有调用，前端却显示已完成。
+#
+# 两道防线：
+# 1. 平台生成的消息打标记，喂给模型时加前缀说明"这不是你的输出"，从源头削弱模仿
+# 2. 兜底拦截：模型没调工具却产出确认文案/完成文案时，替换成纠正提示
+
+_SYSTEM_FLAG = "system_generated"
+
+# 只有平台该写的文案
+_CONFIRM_PROMPT_MARKERS = ("回复“确认”或“取消”", "回复确认或取消")
+# 完成类措辞（模型没调工具就说这些 = 幻觉）
+_COMPLETION_MARKERS = (
+    "已发送", "发送成功", "已创建", "创建成功", "已归档", "已更新",
+    "已设置", "已记录", "已添加", "已删除", "已完成",
+)
+# 这些是"询问做没做"，不是要求执行，不能误判
+_QUESTION_HINTS = ("吗", "?", "？", "是否", "有没有")
+# 用户消息里出现这些词，说明这一轮是在要求执行动作
+_ACTION_HINTS = (
+    "发邮件", "发送", "邮件", "创建", "新建", "建个", "记一条", "记一下",
+    "归档", "删除", "提醒", "日程", "页面",
+)
+
+FABRICATION_NOTICE = (
+    "⚠️ 需要说明一下：刚才这条回复并没有真正执行任何操作（本轮没有调用工具），"
+    "所以事情还没有完成。请把需求再说一次，我会实际调用工具去做。"
+)
+
+
+def _system_msg(content: str) -> AIMessage:
+    """构造一条"平台生成"的助手消息（确认文案 / 执行结果 / 状态提示）。"""
+    return AIMessage(content=content, additional_kwargs={_SYSTEM_FLAG: True})
+
+
+def _to_model_view(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """
+    构造"给模型看"的消息列表。
+
+    平台生成的助手消息加前缀，明确告诉模型这不是它的输出。
+    只影响喂给模型的内容，不改数据库里存的、也不改前端展示的。
+    """
+    view: list[BaseMessage] = []
+    for m in messages:
+        if isinstance(m, AIMessage) and (m.additional_kwargs or {}).get(_SYSTEM_FLAG):
+            view.append(AIMessage(
+                content=f"[平台自动生成的内容，不是你的输出，不要模仿此格式] {m.content}",
+            ))
+        else:
+            view.append(m)
+    return view
+
+
+def _last_human_text(messages: list[BaseMessage]) -> str:
+    """取最后一条用户消息的文本。"""
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            return m.content if isinstance(m.content, str) else str(m.content)
+    return ""
+
+
+def _guard_reply(ai_msg: AIMessage, messages: list[BaseMessage]) -> AIMessage:
+    """
+    拦截模型"演"出来的回复。
+
+    两种情况一定不是真实执行结果：
+    1. 模型自己产出确认文案（"回复确认或取消"）——这段只能由平台生成
+    2. 用户刚说"确认"或刚下了执行指令，模型没调用工具却宣称已完成
+    """
+    if ai_msg.tool_calls:
+        return ai_msg
+
+    content = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
+    if not content:
+        return ai_msg
+
+    if any(marker in content for marker in _CONFIRM_PROMPT_MARKERS):
+        return AIMessage(content=FABRICATION_NOTICE)
+
+    if any(marker in content for marker in _COMPLETION_MARKERS):
+        human_text = _last_human_text(messages).strip().lower()
+        is_confirm_reply = human_text in CONFIRM_WORDS
+        is_question = any(hint in human_text for hint in _QUESTION_HINTS)
+        wants_action = any(hint in human_text for hint in _ACTION_HINTS)
+        if not is_question and (is_confirm_reply or wants_action):
+            return AIMessage(content=FABRICATION_NOTICE)
+
+    return ai_msg
 
 
 def _format_confirmation(tool_name: str, args: dict) -> str:
@@ -107,6 +202,11 @@ def _format_confirmation_batch(actions: list[dict]) -> str:
 
 def _format_result(tool_name: str, result: dict) -> str:
     """工具结果 → 用户友好文案。"""
+    # 幂等命中：这次并没有真的调用外部接口，必须明确告知，
+    # 不能显示成"已发送/已创建"，否则用户会以为又执行了一次
+    if isinstance(result, dict) and result.get("deduplicated"):
+        return "⚠️ 这是一次重复请求，已跳过重复执行（此前同样的操作已经完成过）。"
+
     if tool_name == "create_calendar_event":
         return f"✅ 日程已创建：{result.get('title')}（{result.get('start')}）"
     if tool_name == "list_calendar_events":
@@ -181,20 +281,32 @@ async def prepare_context_node(state: AgentState) -> dict:
     return {
         "messages": [
             *[RemoveMessage(id=m.id) for m in old if getattr(m, "id", None)],
-            AIMessage(content=f"[历史摘要] {summary_text}"),
+            _system_msg(f"[历史摘要] {summary_text}"),
         ]
     }
 
 
 async def llm_node(state: AgentState) -> dict:
-    """调用绑定工具的 LLM。"""
+    """调用绑定工具的 LLM（并拦住"没调工具却说已完成"的回复）。"""
     system_msg = await build_system_msg(
         state["user_id"], state.get("timezone", "Asia/Shanghai"),
     )
     trimmed = trim_history(state["messages"])
-    msgs = [system_msg] + trimmed
+    msgs = [system_msg] + _to_model_view(trimmed)
 
     ai_msg: AIMessage = await _llm_with_tools.ainvoke(msgs)
+
+    guarded = _guard_reply(ai_msg, state["messages"])
+    if guarded is not ai_msg:
+        # 被拦下的"演戏"回复要留痕，方便事后在审计里查（状态 blocked）
+        await _audit(
+            state["user_id"], state["session_id"], "assistant_reply_guard",
+            {"reply": (ai_msg.content or "")[:300]},
+            {"action": "blocked", "reason": "no_tool_call_but_claimed_done"},
+            "blocked",
+        )
+        return {"messages": [guarded]}
+
     return {"messages": [ai_msg]}
 
 
@@ -273,7 +385,7 @@ async def prepare_confirmation_node(state: AgentState) -> dict:
         "messages": [
             *safe_msgs,
             *pending_msgs,
-            AIMessage(content=_format_confirmation_batch(queue)),
+            _system_msg(_format_confirmation_batch(queue)),
         ],
     }
 
@@ -307,7 +419,7 @@ async def summarize_node(state: AgentState) -> dict:
         state["user_id"], state.get("timezone", "Asia/Shanghai"),
     )
     trimmed = trim_history(state["messages"])
-    msgs = [system_msg] + trimmed
+    msgs = [system_msg] + _to_model_view(trimmed)
 
     ai_msg: AIMessage = await _llm.ainvoke(msgs)
     return {"messages": [ai_msg]}
@@ -326,21 +438,21 @@ async def handle_confirmation_node(state: AgentState) -> dict:
 
     if not queue:
         return {"stage": "IDLE",
-                "messages": [AIMessage(content="当前没有待确认的操作。")]}
+                "messages": [_system_msg("当前没有待确认的操作。")]}
 
     if text in CANCEL_WORDS:
         return {"stage": "IDLE", "pending_action": None, "pending_actions": [],
-                "messages": [AIMessage(content="已取消该操作。")]}
+                "messages": [_system_msg("已取消该操作。")]}
 
     if text not in CONFIRM_WORDS:
-        return {"messages": [AIMessage(content="请回复“确认”或“取消”。")]}
+        return {"messages": [_system_msg("请回复“确认”或“取消”。")]}
 
     # 过期判断以队列里最早的动作时间为准（队列是一次生成、一次确认）
     created = datetime.fromisoformat(queue[0]["created_at"])
     age = (datetime.now(timezone.utc) - created).total_seconds()
     if age > settings.confirm_ttl_seconds:
         return {"stage": "IDLE", "pending_action": None, "pending_actions": [],
-                "messages": [AIMessage(content="操作已过期，请重新发起。")]}
+                "messages": [_system_msg("操作已过期，请重新发起。")]}
 
     replies: list[str] = []
     for action in queue:
@@ -356,7 +468,7 @@ async def handle_confirmation_node(state: AgentState) -> dict:
             replies.append(f"❌ {action['tool']} 执行失败：{e}")
 
     return {"stage": "IDLE", "pending_action": None, "pending_actions": [],
-            "messages": [AIMessage(content="\n".join(replies))]}
+            "messages": [_system_msg("\n".join(replies))]}
 
 
 def _pending_queue(state: AgentState) -> list[dict]:
