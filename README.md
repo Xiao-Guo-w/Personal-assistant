@@ -1,6 +1,6 @@
 # Personal Assistant Agent｜个人智能事务助手
 
-**基于 LangGraph \+ FastAPI \+ Streamlit 构建的多用户智能事务 Agent**
+**基于 LangGraph \+ FastAPI \+ Vue 3 构建的多用户智能事务 Agent**
 
 内置长期记忆、智能上下文压缩、工具调用幂等、危险操作二次确认、调用审计日志等企业级能力，可用于个人日程、邮件、知识库、提醒自动化管理。
 
@@ -22,7 +22,7 @@
 
 * 后端：FastAPI、SQLAlchemy\(异步\)、LangChain、LangGraph
 
-* 前端：Streamlit
+* 前端：Vue 3（Vite + TypeScript + Vue Router）
 
 * 数据：SQLite（可无缝替换 PostgreSQL）
 
@@ -51,7 +51,16 @@
     uvicorn backend.main:app --reload --port 8000
 
     # 启动前端
-    streamlit run frontend/app.py
+    cd frontend
+    npm install
+    npm run dev
+
+    # 前端地址：http://localhost:5173
+    # 开发服务器会把 /api 请求代理到 http://localhost:8000，无需处理跨域
+
+    # 生产构建（产物在 frontend/dist）
+    npm run build
+    npm run preview
 
 **🎯 适用场景**
 
@@ -60,5 +69,4 @@
 **📎 扩展方向**
 
 可无缝对接真实 Notion / 谷歌日历 / 企业邮箱 API、接入多模态、增加流式输出、分布式部署、权限系统与限流监控。
-
 

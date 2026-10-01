@@ -108,7 +108,7 @@ def compact_tool_result(tool_name: str, result: dict) -> dict:
             ],
         }
 
-    if tool_name in ("create_reminder", "cancel_reminder"):
+    if tool_name in ("create_reminder", "cancel_reminder", "schedule_email"):
         return result
 
     raw = json.dumps(result, ensure_ascii=False)

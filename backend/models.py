@@ -188,6 +188,10 @@ class Reminder(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # 任务类型：reminder=到点通知自己；email=到点把邮件发给收件人
+    kind: Mapped[str] = mapped_column(String(16), default="reminder", index=True)
+    # 定时邮件的内容（JSON：to / subject / body）；提醒类为空
+    payload_json: Mapped[str] = mapped_column(Text, default="")
     text: Mapped[str] = mapped_column(Text)
     remind_at: Mapped[datetime] = mapped_column(DateTime, index=True)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)

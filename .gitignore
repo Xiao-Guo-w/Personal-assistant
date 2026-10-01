@@ -17,3 +17,18 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+
+# 依赖包
+node_modules/
+
+# vite打包产物
+dist/
+
+# vite本地缓存目录
+.vite/
+
+# 本地环境文件
+*.local
+
+

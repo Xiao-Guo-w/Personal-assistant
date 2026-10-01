@@ -73,7 +73,7 @@ def search_email(query: str, max_results: int = 5) -> dict:
 
 @tool
 def send_email(to: str, subject: str, body: str) -> dict:
-    """通过用户的 QQ 邮箱发送邮件。
+    """通过用户的 QQ 邮箱立即发送邮件。如果要"到某个时间再发"，改用 schedule_email。
 
     Args:
         to: 收件人邮箱
@@ -83,6 +83,25 @@ def send_email(to: str, subject: str, body: str) -> dict:
     if not to or not subject:
         raise ValueError("收件人和主题不能为空")
     return {"to": to, "subject": subject, "body": body, "status": "pending"}
+
+
+@tool
+def schedule_email(to: str, subject: str, body: str, send_at: str) -> dict:
+    """定时发送邮件：到点后系统自动把邮件发给收件人。
+
+    Args:
+        to: 收件人邮箱
+        subject: 邮件主题
+        body: 邮件正文（纯文本）
+        send_at: 发送时间，ISO8601 格式。"明天早上 9 点"这类相对时间要先换算成
+                 具体日期时间并带用户时区，例如 2026-10-02T09:00:00+08:00
+    """
+    if not to or not subject:
+        raise ValueError("收件人和主题不能为空")
+    return {
+        "to": to, "subject": subject, "body": body, "send_at": send_at,
+        "status": "pending",
+    }
 
 
 # ============================================================
@@ -238,6 +257,7 @@ ALL_TOOLS = [
     create_calendar_event,
     search_email,
     send_email,
+    schedule_email,
     create_reminder,
     list_reminders,
     cancel_reminder,
@@ -253,6 +273,7 @@ TOOL_META: dict[str, dict] = {
     "create_calendar_event":  {"risk": "confirm", "retryable": True},
     "search_email":           {"risk": "safe",    "retryable": True},
     "send_email":             {"risk": "confirm", "retryable": True},
+    "schedule_email":         {"risk": "confirm", "retryable": True},
     "create_reminder":        {"risk": "confirm", "retryable": True},
     "list_reminders":         {"risk": "safe",    "retryable": True},
     "cancel_reminder":        {"risk": "confirm", "retryable": True},

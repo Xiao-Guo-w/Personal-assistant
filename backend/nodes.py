@@ -146,6 +146,15 @@ def _format_confirmation(tool_name: str, args: dict) -> str:
             f"- 正文：{args.get('body')}\n"
             "回复“确认”或“取消”。"
         )
+    if tool_name == "schedule_email":
+        return (
+            "即将安排定时邮件（到点自动发出）：\n"
+            f"- 收件人：{args.get('to')}\n"
+            f"- 主题：{args.get('subject')}\n"
+            f"- 正文：{(args.get('body') or '')[:80]}\n"
+            f"- 发送时间：{args.get('send_at')}\n"
+            "回复“确认”或“取消”。"
+        )
     if tool_name == "create_reminder":
         return (
             "即将创建提醒：\n"
@@ -221,6 +230,9 @@ def _format_result(tool_name: str, result: dict) -> str:
         return f"✅ 查询到 {len(result.get('events', []))} 个日程"
     if tool_name == "send_email":
         return f"✅ 邮件已发送至 {result.get('to')}"
+    if tool_name == "schedule_email":
+        when = result.get("send_at_local") or result.get("send_at")
+        return f"✅ 定时邮件已安排：{when} 发给 {result.get('to')}"
     if tool_name == "search_email":
         return f"✅ 找到 {len(result.get('messages', []))} 封相关邮件"
     if tool_name == "create_reminder":

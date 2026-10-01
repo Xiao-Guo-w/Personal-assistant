@@ -147,8 +147,10 @@ async def execute_with_retry(
             idempotency_key, max_retries, meta,
         )
 
-    # ---------- 特判 5：提醒系列 ----------
-    if tool_name in ("create_reminder", "list_reminders", "cancel_reminder"):
+    # ---------- 特判 5：提醒 / 定时任务系列（定时邮件也落在这张表） ----------
+    if tool_name in (
+        "create_reminder", "list_reminders", "cancel_reminder", "schedule_email",
+    ):
         return await _execute_reminder_tool(
             session_id, tool_name, args, user_id,
             idempotency_key, max_retries, meta,
@@ -397,7 +399,8 @@ async def _execute_reminder_tool(
     提醒是真实副作用（会发邮件），所以和 Notion/邮箱一样走用户级数据 + 审计。
     """
     from .reminders import (
-        ReminderError, cancel_reminder, create_reminder, list_reminders,
+        ReminderError, cancel_reminder, create_reminder, create_scheduled_email,
+        list_reminders,
     )
 
     if idempotency_key:
@@ -414,14 +417,25 @@ async def _execute_reminder_tool(
             if tool_name == "create_reminder":
                 result = await create_reminder(
                     user_id=user_id,
-                    text=args["text"],
-                    remind_at=args["remind_at"],
+                    # 用 get + 默认值：缺参数时由 reminders 抛可读的 ReminderError，
+                    # 而不是 KeyError 变成"工具内部错误"
+                    text=args.get("text", ""),
+                    remind_at=args.get("remind_at", ""),
                 )
             elif tool_name == "list_reminders":
                 result = await list_reminders(
                     user_id=user_id,
                     status=args.get("status", "pending"),
                     limit=args.get("limit", 10),
+                )
+            elif tool_name == "schedule_email":
+                # 定时邮件：只落库排队，到点由调度器真正发出
+                result = await create_scheduled_email(
+                    user_id=user_id,
+                    to=args.get("to", ""),
+                    subject=args.get("subject", ""),
+                    body=args.get("body", ""),
+                    send_at=args.get("send_at", ""),
                 )
             elif tool_name == "cancel_reminder":
                 result = await cancel_reminder(

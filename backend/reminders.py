@@ -11,6 +11,7 @@
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -26,8 +27,8 @@ logger = logging.getLogger("assistant.reminders")
 
 DEFAULT_TZ = "Asia/Shanghai"
 
-# 查询用的状态白名单（all 表示不过滤）
-VALID_STATUSES = ("pending", "fired", "cancelled", "all")
+# 查询用的状态白名单（all 表示不过滤）；failed 专指"该发出去但没发成功"
+VALID_STATUSES = ("pending", "fired", "failed", "cancelled", "all")
 
 
 class ReminderError(Exception):
@@ -61,7 +62,9 @@ def parse_remind_at(raw: str, tz_name: str = DEFAULT_TZ) -> datetime:
     """
     text = (raw or "").strip()
     if not text:
-        raise ReminderError("缺少提醒时间，请给出具体时间（例如 2026-10-02T10:00:00+08:00）。")
+        raise ReminderError(
+            "缺少提醒/发送时间，请给出具体时间（例如 2026-10-02T10:00:00+08:00）。"
+        )
 
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -117,12 +120,32 @@ async def _user_timezone(user_id: int) -> str:
     return tz or DEFAULT_TZ
 
 
+def _row_payload(row: Reminder) -> dict:
+    """
+    解析 payload_json（只有定时邮件用）。
+
+    解析失败按空处理，不让一条脏数据把列表接口整个搞崩。
+    """
+    if (row.kind or "reminder") != "email":
+        return {}
+    try:
+        data = json.loads(row.payload_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def _serialize(row: Reminder, tz_name: str) -> dict:
     """ORM 对象 → 接口/工具用的 dict。"""
+    payload = _row_payload(row)
     return {
         "id": row.id,
         "reminder_id": f"rem_{row.id}",
+        "kind": row.kind or "reminder",
         "text": row.text,
+        # 定时邮件才有：收件人和主题，供前端/模型区分展示
+        "to": payload.get("to", ""),
+        "subject": payload.get("subject", ""),
         "remind_at": to_iso_utc(row.remind_at),
         "remind_at_local": format_local(row.remind_at, tz_name),
         "status": row.status,
@@ -160,6 +183,59 @@ async def create_reminder(user_id: int, text: str, remind_at: str) -> dict:
         "text": content,
         "remind_at": to_iso_utc(when),
         "remind_at_local": format_local(when, tz_name),
+        "status": "pending",
+    }
+
+
+async def create_scheduled_email(
+    user_id: int, to: str, subject: str, body: str, send_at: str,
+) -> dict:
+    """
+    安排一封定时邮件：到点后由调度器真正发给收件人。
+
+    和提醒共用一张表（kind=email），所以列表、取消、审计都沿用同一套逻辑；
+    邮件正文放在 payload_json 里，到点才读取发送。
+    """
+    recipient = (to or "").strip()
+    title = (subject or "").strip()
+    content = body or ""
+
+    if not recipient or not title:
+        raise ReminderError("收件人和主题不能为空。")
+    if "@" not in recipient:
+        raise ReminderError(f"收件人地址看起来不对：{recipient}")
+
+    tz_name = await _user_timezone(user_id)
+    when = parse_remind_at(send_at, tz_name)
+
+    payload = json.dumps(
+        {"to": recipient, "subject": title, "body": content[:5000]},
+        ensure_ascii=False,
+    )
+    display = f"给 {recipient} 发送《{title}》"
+
+    async with session_scope() as db:
+        row = Reminder(
+            user_id=user_id,
+            kind="email",
+            payload_json=payload,
+            text=display,
+            remind_at=when,
+            status="pending",
+        )
+        db.add(row)
+        await db.flush()
+        reminder_id = row.id
+
+    return {
+        "reminder_id": f"rem_{reminder_id}",
+        "id": reminder_id,
+        "kind": "email",
+        "to": recipient,
+        "subject": title,
+        "text": display,
+        "send_at": to_iso_utc(when),
+        "send_at_local": format_local(when, tz_name),
         "status": "pending",
     }
 
@@ -231,9 +307,10 @@ async def cancel_reminder(user_id: int, reminder_id: str = "", text: str = "") -
 
 async def list_inbox(user_id: int, limit: int = 20) -> dict:
     """
-    站内通知：已经触发、但用户还没点"知道了"的提醒。
+    站内通知：已经投递过（成功或失败）、但用户还没点"知道了"的任务。
 
     前端会定时轮询它，到点后就能在聊天页顶部看到提醒卡片。
+    失败的定时邮件也在这里出现 —— 用户必须能看到"没发出去"。
     """
     tz_name = await _user_timezone(user_id)
     async with session_scope() as db:
@@ -242,7 +319,7 @@ async def list_inbox(user_id: int, limit: int = 20) -> dict:
                 select(Reminder)
                 .where(
                     Reminder.user_id == user_id,
-                    Reminder.status == "fired",
+                    Reminder.status.in_(("fired", "failed")),
                     Reminder.acknowledged_at.is_(None),
                 )
                 .order_by(Reminder.fired_at.desc())
@@ -305,9 +382,12 @@ async def dispatch_due_reminders(limit: int = 50) -> int:
 
 async def _deliver(reminder_id: int) -> None:
     """
-    投递一条提醒：邮件（尽力而为）+ 站内收件箱（记录本身就是通知）。
+    投递一条计划任务。
 
-    邮件失败不阻断站内通知，失败原因写进 last_error 供前端展示。
+    - kind=reminder：给自己发一封提醒邮件 + 站内通知（邮件失败只降级，不算失败）
+    - kind=email：把邮件真正发给收件人；失败会把状态置为 failed 并写明原因，
+      这样"定时邮件没发出去"不会被当成成功
+    两种都会在站内收件箱留一条记录。
     """
     async with session_scope() as db:
         row = (
@@ -318,38 +398,64 @@ async def _deliver(reminder_id: int) -> None:
         user_id = row.user_id
         text = row.text
         remind_at = row.remind_at
+        kind = row.kind or "reminder"
+        payload = _row_payload(row)
 
     tz_name = await _user_timezone(user_id)
     local_time = format_local(remind_at, tz_name)
 
     delivered = ["in_app"]
     last_error = ""
-    try:
-        # 邮件发到用户自己配置的邮箱；没配邮箱不算错误，站内照样能看到
-        from .email_client_wrapper import EmailNotConfiguredError, send_self_email
+    failed = False
 
-        await send_self_email(
-            user_id,
-            subject=f"⏰ 提醒：{text}",
-            body=(
-                f"你设置的提醒到点了。\n\n"
-                f"内容：{text}\n"
-                f"时间：{local_time}\n\n"
-                f"—— 个人事务助理"
-            ),
-        )
-        delivered.insert(0, "email")
-    except EmailNotConfiguredError:
-        last_error = "未配置邮箱，本次只发了站内通知"
-    except Exception as e:  # noqa: BLE001 —— 投递失败不能影响其他提醒
-        last_error = f"邮件投递失败：{e}"
+    from .email_client_wrapper import EmailNotConfiguredError
+
+    if kind == "email":
+        # 定时邮件：到点真正发给收件人，发不出去就是没完成
+        try:
+            from .email_client_wrapper import send_email
+
+            await send_email(
+                user_id,
+                to=payload.get("to", ""),
+                subject=payload.get("subject", ""),
+                body=payload.get("body", ""),
+            )
+            delivered.insert(0, "email")
+        except EmailNotConfiguredError:
+            last_error = "未配置邮箱，定时邮件无法发出"
+            failed = True
+        except Exception as e:  # noqa: BLE001
+            last_error = f"定时邮件发送失败：{e}"
+            failed = True
+    else:
+        # 提醒：邮件是"顺带通知"，失败降级为只有站内通知
+        try:
+            from .email_client_wrapper import send_self_email
+
+            await send_self_email(
+                user_id,
+                subject=f"⏰ 提醒：{text}",
+                body=(
+                    f"你设置的提醒到点了。\n\n"
+                    f"内容：{text}\n"
+                    f"时间：{local_time}\n\n"
+                    f"—— 个人事务助理"
+                ),
+            )
+            delivered.insert(0, "email")
+        except EmailNotConfiguredError:
+            last_error = "未配置邮箱，本次只发了站内通知"
+        except Exception as e:  # noqa: BLE001 —— 投递失败不能影响其他提醒
+            last_error = f"邮件投递失败：{e}"
 
     async with session_scope() as db:
         await db.execute(
             update(Reminder)
             .where(Reminder.id == reminder_id)
             .values(
-                status="fired",
+                # 定时邮件发失败标记为 failed，避免"看起来成功了"
+                status="failed" if failed else "fired",
                 fired_at=_now_utc(),
                 fired_via="+".join(delivered),
                 last_error=last_error[:500],
