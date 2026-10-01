@@ -48,6 +48,12 @@ def trim_history(messages: list[BaseMessage]) -> list[BaseMessage]:
 
 def compact_tool_result(tool_name: str, result: dict) -> dict:
     """Layer 2：工具结果压缩。"""
+    # 失败结果必须原样透传：下面按工具重拼字段时会把 "error" 丢掉，
+    # 于是"调用失败"在模型眼里就变成了"查询到 0 条"，用户收到的是
+    # "没找到页面"而不是报错（Notion 查询失败被吞掉就是这个原因）。
+    if isinstance(result, dict) and result.get("error"):
+        return result
+
     if tool_name == "search_email":
         msgs = result.get("messages", [])
         return {
@@ -73,7 +79,7 @@ def compact_tool_result(tool_name: str, result: dict) -> dict:
             ],
         }
 
-    if tool_name == "query_notion_database":
+    if tool_name == "list_notion_pages":
         pages = result.get("pages", [])
         return {
             "count": len(pages),

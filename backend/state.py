@@ -4,7 +4,8 @@ LangGraph 图状态。
 字段说明：
 - messages：LangChain 消息列表，add_messages reducer 自动追加
 - stage：IDLE / WAITING_CONFIRMATION
-- pending_action：等待确认时非空
+- pending_action：等待确认时非空（队列里的第一个动作，兼容旧会话/接口）
+- pending_actions：等待确认的动作队列，确认后按顺序全部执行
 - session_id：业务会话 ID（同时作为 thread_id）
 - user_id：用户 ID（长期记忆归属）
 - timezone：用户时区（系统提示注入）
@@ -21,7 +22,8 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
     stage: str                     # IDLE / WAITING_CONFIRMATION
-    pending_action: dict | None    # 等待确认时非空
+    pending_action: dict | None    # 等待确认时非空（队列首项）
+    pending_actions: list[dict]    # 等待确认的动作队列（可能多于一个）
     session_id: str                # 与 thread_id 一致
     user_id: int                   # 用户 ID（长期记忆隔离）
     timezone: str                  # 用户时区

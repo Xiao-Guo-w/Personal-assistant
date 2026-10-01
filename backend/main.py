@@ -457,7 +457,7 @@ async def integrations_status(user: dict = Depends(current_user)):
         "connected": bool(notion and notion.get("access_token")),
         "workspace_name": notion.get("workspace_name", "") if notion else "",
         "workspace_id": notion.get("workspace_id", "") if notion else "",
-        "default_database_id": notion.get("default_database_id", "") if notion else "",
+        "default_parent_page_id": notion.get("default_parent_page_id", "") if notion else "",
     }
 
     email = await get_integration(user["id"], "email")
@@ -492,24 +492,48 @@ async def disconnect_integration(provider: str, user: dict = Depends(current_use
 # Notion 辅助接口
 # ============================================================
 
-@app.put("/api/integrations/notion/default-database")
-async def set_notion_default_database(
-    database_id: str,
+@app.put("/api/integrations/notion/default-parent-page")
+async def set_notion_default_parent_page(
+    page_id: str,
     user: dict = Depends(current_user),
 ):
-    """设置 Notion 默认数据库 ID。"""
-    from .notion_client_wrapper import set_default_database
-    await set_default_database(user["id"], database_id)
-    return {"ok": True}
+    """
+    设置 Notion 默认父页面（页面模式下新页面的落点）。
+
+    写入前先真正访问一次 Notion（inspect_parent_page）：
+    挡住拼错 / 被截断的 ID，以及"这个页面没授权给集成"的情况。
+    """
+    from .notion_client_wrapper import (
+        NotionAuthError, NotionNotConfiguredError,
+        inspect_parent_page, set_default_parent_page,
+    )
+
+    try:
+        page = await inspect_parent_page(user["id"], page_id)
+    except (NotionNotConfiguredError, NotionAuthError) as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001 —— Notion 侧异常统一转成可读错误
+        raise HTTPException(502, f"校验父页面失败：{e}")
+
+    await set_default_parent_page(user["id"], page["page_id"])
+    return {
+        "ok": True,
+        "page_id": page["page_id"],
+        "title": page.get("title", ""),
+    }
 
 
-@app.get("/api/integrations/notion/databases")
-async def list_notion_databases(user: dict = Depends(current_user)):
-    """列出用户授权范围内的所有 database。"""
-    from .notion_client_wrapper import search_pages
-    result = await search_pages(user["id"], query="", page_size=50)
-    databases = [r for r in result.get("results", []) if r.get("type") == "database"]
-    return {"databases": databases}
+@app.get("/api/integrations/notion/pages")
+async def list_notion_pages(user: dict = Depends(current_user)):
+    """列出用户授权范围内可见的页面（用于选择默认父页面）。"""
+    from .notion_client_wrapper import NotionAuthError, list_pages
+
+    try:
+        return {"pages": await list_pages(user["id"])}
+    except NotionAuthError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"查询页面列表失败：{e}")
 
 
 # ============================================================

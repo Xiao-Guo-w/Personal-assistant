@@ -520,38 +520,42 @@ def render_settings_page():
             authorize_path="/api/oauth/notion/authorize",
         )
 
-        # Notion 特有：默认数据库选择
+        # Notion 特有：默认父页面选择（页面模式：不使用数据库）
         notion_status = status_data.get("notion", {})
         if notion_status.get("connected"):
             st.divider()
-            st.subheader("默认数据库")
-            st.caption("Agent 未指定数据库时会写入这里。")
+            st.subheader("默认父页面")
+            st.caption("Agent 创建的 Notion 页面，都会作为这个页面的子页面写入。")
 
-            if st.button("🔍 列出所有数据库", use_container_width=True):
-                dr = _api_get("/api/integrations/notion/databases")
+            if st.button("🔍 列出可写入的页面", use_container_width=True):
+                dr = _api_get("/api/integrations/notion/pages")
                 if dr.status_code == 200:
-                    databases = dr.json().get("databases", [])
-                    if not databases:
+                    pages = dr.json().get("pages", [])
+                    if not pages:
                         st.warning(
-                            "未找到任何 database。请在 Notion 中授权包含 database 的页面。"
+                            "未找到任何页面。请在 Notion 授权时勾选要使用的页面。"
                         )
                     else:
-                        st.session_state["_notion_databases"] = databases
+                        st.session_state["_notion_pages"] = pages
                 else:
                     st.error(f"查询失败：{dr.text}")
 
-            databases = st.session_state.get("_notion_databases", [])
-            if databases:
-                options = {
-                    f"{d['title'] or '(无标题)'} · {d['id'][:8]}": d["id"]
-                    for d in databases
-                }
-                selected = st.selectbox("选择默认数据库", list(options.keys()))
+            pages = st.session_state.get("_notion_pages", [])
+            if pages:
+                # 标签里给完整 ID：旧版只显示前 8 位，用户会把那 8 位当成
+                # 完整 ID 发给 Agent（或从界面复制），Notion 随即报 400
+                options = {}
+                for p in pages:
+                    label = f"{p['title'] or '(无标题)'} · {p['id']}"
+                    if p.get("is_top_level"):
+                        label = "🏠 " + label   # 顶层页面更适合当"笔记本"
+                    options[label] = p["id"]
+
+                selected = st.selectbox("选择默认父页面", list(options.keys()))
                 if st.button("💾 设为默认", type="primary", use_container_width=True):
-                    db_id = options[selected]
                     dr = requests.put(
-                        f"{API}/api/integrations/notion/default-database",
-                        params={"database_id": db_id},
+                        f"{API}/api/integrations/notion/default-parent-page",
+                        params={"page_id": options[selected]},
                         headers=_headers(), timeout=10,
                     )
                     if dr.status_code == 200:
@@ -560,9 +564,11 @@ def render_settings_page():
                     else:
                         st.error(f"设置失败：{dr.text}")
 
-            current_db = notion_status.get("default_database_id", "")
-            if current_db:
-                st.caption(f"当前默认数据库：`{current_db}`")
+            current_page = notion_status.get("default_parent_page_id", "")
+            if current_page:
+                st.caption(f"当前默认父页面：`{current_page}`")
+            else:
+                st.warning("还没有设置默认父页面，Agent 目前无法创建 Notion 页面。")
 
     # ============ 飞书日历 ============
     with tab_feishu:

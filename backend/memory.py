@@ -64,8 +64,8 @@ MEMORY_KEY_META: dict[str, dict] = {
         "icon": "🎭", "format": "plain",
     },
     # ---------- 工具与集成 ----------
-    "notion_default_database": {
-        "label": "默认 Notion 数据库", "category": "工具与集成",
+    "notion_parent_page": {
+        "label": "默认 Notion 父页面", "category": "工具与集成",
         "icon": "📝", "format": "plain",
     },
 }

@@ -107,61 +107,73 @@ def create_reminder(text: str, remind_at: str) -> dict:
 
 # ============================================================
 # Notion 工具（占位，真实调用在 executor）
+#
+# 页面模式：不使用数据库，所有新页面都是「默认父页面」下的子页面，
+# 因此这里只有 parent_page_id，没有 database_id / properties。
 # ============================================================
 
 @tool
 def create_notion_page(
-    database_id: str = "",
-    title: str = "",
-    properties: dict | None = None,
+    title: str,
+    content: str = "",
+    parent_page_id: str = "",
 ) -> dict:
-    """在用户自己的 Notion 数据库中创建页面。
+    """在用户自己的 Notion 父页面下创建子页面。
 
     Args:
-        database_id: 目标数据库 ID。留空则用用户配置的默认数据库。
         title: 页面标题
-        properties: 其他属性（可选），如 {"Status": {"select": {"name": "Todo"}}}
+        content: 页面正文（纯文本，按行分段，可选）
+        parent_page_id: 父页面 ID。留空则用用户设置的默认父页面。
     """
     if not title:
         raise ValueError("标题不能为空")
     return {
-        "database_id": database_id,
         "title": title,
-        "properties": properties or {},
+        "content": content,
+        "parent_page_id": parent_page_id,
         "status": "pending",
     }
 
 
 @tool
-def query_notion_database(
-    database_id: str = "",
-    filter_obj: dict | None = None,
+def list_notion_pages(
+    parent_page_id: str = "",
     page_size: int = 10,
 ) -> dict:
-    """查询用户自己的 Notion 数据库。
+    """列出用户 Notion 父页面下的子页面。
 
     Args:
-        database_id: 目标数据库 ID。留空则用默认数据库。
-        filter_obj: Notion 原生 filter 结构（可选）
+        parent_page_id: 父页面 ID。留空则用默认父页面。
         page_size: 最多返回条数
     """
     return {
-        "database_id": database_id,
-        "filter_obj": filter_obj,
+        "parent_page_id": parent_page_id,
         "page_size": page_size,
         "status": "pending",
     }
 
 
 @tool
-def update_notion_page(page_id: str, properties: dict) -> dict:
-    """更新用户自己的 Notion 页面属性。
+def update_notion_page(
+    page_id: str,
+    title: str = "",
+    append_content: str = "",
+) -> dict:
+    """修改 Notion 页面的标题，或在页面末尾追加正文。
 
     Args:
         page_id: 页面 ID
-        properties: 要更新的属性（Notion 原生格式）
+        title: 新标题（可选，留空表示不改标题）
+        append_content: 追加到页面末尾的正文（纯文本，可选）
     """
-    return {"page_id": page_id, "properties": properties, "status": "pending"}
+    if not title and not append_content:
+        raise ValueError("请提供新标题（title）或要追加的正文（append_content）")
+    return {
+        "page_id": page_id,
+        "title": title,
+        "append_content": append_content,
+        "status": "pending",
+    }
 
 
 @tool
@@ -203,7 +215,7 @@ ALL_TOOLS = [
     send_email,
     create_reminder,
     create_notion_page,
-    query_notion_database,
+    list_notion_pages,
     update_notion_page,
     archive_notion_page,
     remember_preference,
@@ -216,7 +228,7 @@ TOOL_META: dict[str, dict] = {
     "send_email":             {"risk": "confirm", "retryable": True},
     "create_reminder":        {"risk": "confirm", "retryable": True},
     "create_notion_page":     {"risk": "confirm", "retryable": True},
-    "query_notion_database":  {"risk": "safe",    "retryable": True},
+    "list_notion_pages":      {"risk": "safe",    "retryable": True},
     "update_notion_page":     {"risk": "confirm", "retryable": True},
     "archive_notion_page":    {"risk": "confirm", "retryable": True},
     "remember_preference":    {"risk": "safe",    "retryable": True},

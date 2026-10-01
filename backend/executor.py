@@ -32,6 +32,15 @@ class NonRetryableError(Exception):
     """不可重试错误（400 / 401 / 404）。"""
 
 
+# 属于"代码或参数写错"的异常：重试不可能成功，直接判定为不可重试。
+# 典型场景：SDK 升级后方法被移除（AttributeError，Notion databases.query 就是这样）、
+# 工具参数缺字段（KeyError）、参数校验不通过（ValueError）。
+# 之前这类错误会被当成可重试错误白跑 3 次，并写下一串 retry 审计，掩盖真正原因。
+_PROGRAMMING_ERRORS = (
+    AttributeError, TypeError, KeyError, IndexError, NotImplementedError, ValueError,
+)
+
+
 def make_idempotency_key(
     tool_name: str, args: dict, session_id: str, user_id: int
 ) -> str:
@@ -116,7 +125,7 @@ async def execute_with_retry(
 
     # ---------- 特判 2：Notion 系列 ----------
     if tool_name in (
-        "create_notion_page", "query_notion_database",
+        "create_notion_page", "list_notion_pages",
         "update_notion_page", "archive_notion_page",
     ):
         return await _execute_notion_tool(
@@ -176,10 +185,10 @@ async def _execute_notion_tool(
     session_id: str, tool_name: str, args: dict, user_id: int,
     idempotency_key: str | None, max_retries: int, meta: dict,
 ) -> dict:
-    """Notion 工具执行：走用户级 OAuth 客户端。"""
+    """Notion 工具执行：走用户级 OAuth 客户端（页面模式）。"""
     from .notion_client_wrapper import (
         NotionAuthError, NotionNotConfiguredError,
-        archive_page, create_page_in_database, query_database, update_page,
+        archive_page, create_page_under_parent, list_child_pages, update_page,
     )
 
     if idempotency_key:
@@ -191,24 +200,24 @@ async def _execute_notion_tool(
     for i in range(max_retries):
         try:
             if tool_name == "create_notion_page":
-                result = await create_page_in_database(
+                result = await create_page_under_parent(
                     user_id=user_id,
-                    database_id=args.get("database_id", ""),
+                    parent_page_id=args.get("parent_page_id", ""),
                     title=args["title"],
-                    properties=args.get("properties"),
+                    content=args.get("content", ""),
                 )
-            elif tool_name == "query_notion_database":
-                result = await query_database(
+            elif tool_name == "list_notion_pages":
+                result = await list_child_pages(
                     user_id=user_id,
-                    database_id=args.get("database_id", ""),
-                    filter_obj=args.get("filter_obj"),
+                    parent_page_id=args.get("parent_page_id", ""),
                     page_size=args.get("page_size", 10),
                 )
             elif tool_name == "update_notion_page":
                 result = await update_page(
                     user_id=user_id,
                     page_id=args["page_id"],
-                    properties=args["properties"],
+                    title=args.get("title", ""),
+                    append_content=args.get("append_content", ""),
                 )
             elif tool_name == "archive_notion_page":
                 result = await archive_page(user_id=user_id, page_id=args["page_id"])
@@ -224,6 +233,11 @@ async def _execute_notion_tool(
             await _audit(user_id, session_id, tool_name, args,
                          {"error": str(e)}, "failed")
             raise NonRetryableError(str(e))
+        except _PROGRAMMING_ERRORS as e:
+            # 代码/参数层面的错误：不重试，直接把原因暴露出来
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "failed")
+            raise NonRetryableError(f"工具内部错误：{e}") from e
         except NonRetryableError as e:
             await _audit(user_id, session_id, tool_name, args,
                          {"error": str(e)}, "failed")
