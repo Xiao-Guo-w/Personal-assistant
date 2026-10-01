@@ -1,11 +1,13 @@
 """
 工具执行器：幂等 → 重试 → 审计。
 
-职责边界：
-- nodes.py 决定「调用哪个工具、参数是什么」
-- executor 决定「怎么安全地执行它」
+特判分支：
+- remember_preference：走异步 ORM
+- Notion 系列：走用户级 OAuth 客户端
+- 邮箱系列：走用户级 QQ 邮箱客户端
+- 日历系列：走用户级飞书日历客户端
 
-所有数据库操作走 ORM，与 LangGraph 无关，可独立测试。
+其余工具走 @tool handler（丢线程池）。
 """
 
 import asyncio
@@ -47,7 +49,6 @@ def make_idempotency_key(
 
 
 async def _cache_get(key: str) -> dict | None:
-    """读幂等缓存；未命中返回 None。"""
     async with session_scope() as db:
         result = await db.execute(
             select(Idempotency).where(Idempotency.key == key)
@@ -57,20 +58,13 @@ async def _cache_get(key: str) -> dict | None:
 
 
 async def _cache_set(key: str, result: dict) -> None:
-    """
-    写幂等缓存。
-
-    先查再插，保证重复 set 同一 key 不报错。
-    高并发下应改 INSERT ... ON CONFLICT DO NOTHING。
-    """
     async with session_scope() as db:
         existing = await db.execute(
             select(Idempotency).where(Idempotency.key == key)
         )
         if existing.scalar_one_or_none() is None:
             db.add(Idempotency(
-                key=key,
-                result=json.dumps(result, ensure_ascii=False),
+                key=key, result=json.dumps(result, ensure_ascii=False),
             ))
 
 
@@ -78,7 +72,7 @@ async def _audit(
     user_id: int, session_id: str, tool_name: str,
     args: dict, result, status: str,
 ) -> None:
-    """每次工具调用写一条审计记录。"""
+    """写审计日志。default=str 兜底 datetime 等不可 JSON 化对象。"""
     async with session_scope() as db:
         db.add(AuditLog(
             user_id=user_id,
@@ -105,14 +99,11 @@ async def execute_with_retry(
     1. 幂等：先查缓存，命中直接返回
     2. 重试：只对可重试工具重试，指数退避 + 抖动
     3. 审计：无论成功失败都落一条日志
-
-    特判：remember_preference 不走同步 handler，直接走 ORM。
-    因为记忆写入是异步数据库操作，不适合放在同步 @tool 里。
     """
     meta = get_tool_meta(tool_name)
     max_retries = max_retries or settings.max_retries
 
-    # ---------- 特判：记忆写入 ----------
+    # ---------- 特判 1：记忆写入 ----------
     if tool_name == "remember_preference":
         try:
             await set_user_memory(user_id, args["key"], args["value"])
@@ -123,12 +114,35 @@ async def execute_with_retry(
             await _audit(user_id, session_id, tool_name, args, {"error": str(e)}, "failed")
             raise
 
+    # ---------- 特判 2：Notion 系列 ----------
+    if tool_name in (
+        "create_notion_page", "query_notion_database",
+        "update_notion_page", "archive_notion_page",
+    ):
+        return await _execute_notion_tool(
+            session_id, tool_name, args, user_id,
+            idempotency_key, max_retries, meta,
+        )
+
+    # ---------- 特判 3：邮箱系列 ----------
+    if tool_name in ("search_email", "send_email"):
+        return await _execute_email_tool(
+            session_id, tool_name, args, user_id,
+            idempotency_key, max_retries, meta,
+        )
+
+    # ---------- 特判 4：日历系列 ----------
+    if tool_name in ("list_calendar_events", "create_calendar_event"):
+        return await _execute_calendar_tool(
+            session_id, tool_name, args, user_id,
+            idempotency_key, max_retries, meta,
+        )
+
     # ---------- 通用工具路径 ----------
     tool = TOOL_MAP.get(tool_name)
     if tool is None:
         raise NonRetryableError(f"未知工具：{tool_name}")
 
-    # 幂等命中：直接返回
     if idempotency_key:
         cached = await _cache_get(idempotency_key)
         if cached is not None:
@@ -137,7 +151,6 @@ async def execute_with_retry(
     last_err: Exception | None = None
     for i in range(max_retries):
         try:
-            # 同步 @tool 丢线程池执行，避免阻塞事件循环
             result = await asyncio.to_thread(tool.invoke, args)
             if idempotency_key:
                 await _cache_set(idempotency_key, result)
@@ -154,8 +167,186 @@ async def execute_with_retry(
                          {"error": str(e)}, "retry" if will_retry else "failed")
             if not will_retry:
                 raise
-            # 异步退避：asyncio.sleep，绝不能用 time.sleep
-            # 抖动避免大量请求同时重试造成「惊群」
+            await asyncio.sleep(2 ** i + random.random())
+
+    raise last_err or RuntimeError("unknown error")
+
+
+async def _execute_notion_tool(
+    session_id: str, tool_name: str, args: dict, user_id: int,
+    idempotency_key: str | None, max_retries: int, meta: dict,
+) -> dict:
+    """Notion 工具执行：走用户级 OAuth 客户端。"""
+    from .notion_client_wrapper import (
+        NotionAuthError, NotionNotConfiguredError,
+        archive_page, create_page_in_database, query_database, update_page,
+    )
+
+    if idempotency_key:
+        cached = await _cache_get(idempotency_key)
+        if cached is not None:
+            return cached
+
+    last_err: Exception | None = None
+    for i in range(max_retries):
+        try:
+            if tool_name == "create_notion_page":
+                result = await create_page_in_database(
+                    user_id=user_id,
+                    database_id=args.get("database_id", ""),
+                    title=args["title"],
+                    properties=args.get("properties"),
+                )
+            elif tool_name == "query_notion_database":
+                result = await query_database(
+                    user_id=user_id,
+                    database_id=args.get("database_id", ""),
+                    filter_obj=args.get("filter_obj"),
+                    page_size=args.get("page_size", 10),
+                )
+            elif tool_name == "update_notion_page":
+                result = await update_page(
+                    user_id=user_id,
+                    page_id=args["page_id"],
+                    properties=args["properties"],
+                )
+            elif tool_name == "archive_notion_page":
+                result = await archive_page(user_id=user_id, page_id=args["page_id"])
+            else:
+                raise NonRetryableError(f"未知 Notion 工具：{tool_name}")
+
+            if idempotency_key:
+                await _cache_set(idempotency_key, result)
+            await _audit(user_id, session_id, tool_name, args, result, "success")
+            return result
+
+        except (NotionNotConfiguredError, NotionAuthError) as e:
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "failed")
+            raise NonRetryableError(str(e))
+        except NonRetryableError as e:
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "failed")
+            raise
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            will_retry = meta["retryable"] and i < max_retries - 1
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "retry" if will_retry else "failed")
+            if not will_retry:
+                raise
+            await asyncio.sleep(2 ** i + random.random())
+
+    raise last_err or RuntimeError("unknown error")
+
+
+async def _execute_email_tool(
+    session_id: str, tool_name: str, args: dict, user_id: int,
+    idempotency_key: str | None, max_retries: int, meta: dict,
+) -> dict:
+    """邮箱工具执行：走用户级 QQ 邮箱客户端。"""
+    from .email_client_wrapper import (
+        EmailAuthError, EmailNotConfiguredError,
+        search_email, send_email,
+    )
+
+    if idempotency_key:
+        cached = await _cache_get(idempotency_key)
+        if cached is not None:
+            return cached
+
+    last_err: Exception | None = None
+    for i in range(max_retries):
+        try:
+            if tool_name == "search_email":
+                result = await search_email(
+                    user_id=user_id,
+                    query=args.get("query", ""),
+                    max_results=args.get("max_results", 5),
+                )
+            elif tool_name == "send_email":
+                result = await send_email(
+                    user_id=user_id,
+                    to=args["to"],
+                    subject=args["subject"],
+                    body=args["body"],
+                )
+            else:
+                raise NonRetryableError(f"未知邮箱工具：{tool_name}")
+
+            if idempotency_key:
+                await _cache_set(idempotency_key, result)
+            await _audit(user_id, session_id, tool_name, args, result, "success")
+            return result
+
+        except (EmailNotConfiguredError, EmailAuthError) as e:
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "failed")
+            raise NonRetryableError(str(e))
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            will_retry = meta["retryable"] and i < max_retries - 1
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "retry" if will_retry else "failed")
+            if not will_retry:
+                raise
+            await asyncio.sleep(2 ** i + random.random())
+
+    raise last_err or RuntimeError("unknown error")
+
+
+async def _execute_calendar_tool(
+    session_id: str, tool_name: str, args: dict, user_id: int,
+    idempotency_key: str | None, max_retries: int, meta: dict,
+) -> dict:
+    """日历工具执行：走用户级飞书日历客户端。"""
+    from .feishu_calendar_wrapper import (
+        FeishuApiError, FeishuAuthError, FeishuNotConfiguredError,
+        create_event, list_events,
+    )
+
+    if idempotency_key:
+        cached = await _cache_get(idempotency_key)
+        if cached is not None:
+            return cached
+
+    last_err: Exception | None = None
+    for i in range(max_retries):
+        try:
+            if tool_name == "list_calendar_events":
+                result = await list_events(
+                    user_id=user_id,
+                    time_min=args["time_min"],
+                    time_max=args["time_max"],
+                )
+            elif tool_name == "create_calendar_event":
+                result = await create_event(
+                    user_id=user_id,
+                    title=args["title"],
+                    start=args["start"],
+                    end=args["end"],
+                    attendees=args.get("attendees"),
+                    description=args.get("description", ""),
+                )
+            else:
+                raise NonRetryableError(f"未知日历工具：{tool_name}")
+
+            if idempotency_key:
+                await _cache_set(idempotency_key, result)
+            await _audit(user_id, session_id, tool_name, args, result, "success")
+            return result
+
+        except (FeishuNotConfiguredError, FeishuAuthError, FeishuApiError) as e:
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "failed")
+            raise NonRetryableError(str(e))
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            will_retry = meta["retryable"] and i < max_retries - 1
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "retry" if will_retry else "failed")
+            if not will_retry:
+                raise
             await asyncio.sleep(2 ** i + random.random())
 
     raise last_err or RuntimeError("unknown error")

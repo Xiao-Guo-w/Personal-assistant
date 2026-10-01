@@ -1,8 +1,7 @@
 """
 用户 CRUD 与 token 管理。
 
-所有数据库操作走 session_scope，返回 dict 或 ORM 对象，
-避免 ORM 对象泄漏到路由外（脱离 session 后访问会报错）。
+包含引导流程相关函数：update_user_profile / mark_onboarded。
 """
 
 from datetime import datetime, timedelta, timezone
@@ -16,17 +15,13 @@ from .security import generate_token, hash_password, verify_password
 
 
 async def create_user(
-    username: str,
-    password: str,
-    display_name: str = "",
+    username: str, password: str, display_name: str = "",
     timezone_str: str = "Asia/Shanghai",
 ) -> dict:
     """
     注册新用户。
 
-    唯一性双重校验：
-    1. 应用层先查（给用户友好提示）
-    2. DB 层 unique 约束（并发注册时兜底）
+    onboarded 初始为 False，前端据此触发引导流程。
     """
     async with session_scope() as db:
         existing = await db.execute(
@@ -40,15 +35,16 @@ async def create_user(
             password_hash=hash_password(password),
             display_name=display_name or username,
             timezone=timezone_str,
+            onboarded=False,
         )
         db.add(user)
-        # flush 让 user.id 立即可用（不用等 commit）
         await db.flush()
         return {
             "id": user.id,
             "username": user.username,
             "display_name": user.display_name,
             "timezone": user.timezone,
+            "onboarded": user.onboarded,
         }
 
 
@@ -66,16 +62,12 @@ async def authenticate(username: str, password: str) -> dict | None:
         "username": user.username,
         "display_name": user.display_name,
         "timezone": user.timezone,
+        "onboarded": user.onboarded,
     }
 
 
 async def issue_token(user_id: int) -> str:
-    """
-    登录成功后颁发 token。
-
-    同用户可以有多个有效 token（多端登录），
-    过期时间统一由 settings.token_ttl_seconds 控制。
-    """
+    """登录成功后颁发 token。"""
     token = generate_token()
     expires_at = datetime.now(timezone.utc) + timedelta(
         seconds=settings.token_ttl_seconds
@@ -86,11 +78,7 @@ async def issue_token(user_id: int) -> str:
 
 
 async def resolve_token(token: str) -> dict | None:
-    """
-    根据 token 查用户。
-
-    过期 token 顺手清理，避免表膨胀。
-    """
+    """根据 token 查用户；过期 token 顺手清理。"""
     async with session_scope() as db:
         result = await db.execute(
             select(UserToken, User)
@@ -103,12 +91,12 @@ async def resolve_token(token: str) -> dict | None:
             return None
 
         user_token, user = row
-        # SQLite 存的 datetime 是 naive，比较前补 UTC tzinfo
+        # SQLite 存的 datetime 是 naive，比较前补 UTC
         exp = user_token.expires_at
         if exp.tzinfo is None:
             exp = exp.replace(tzinfo=timezone.utc)
         if exp < datetime.now(timezone.utc):
-            await db.delete(user_token)   # 顺手清理过期
+            await db.delete(user_token)
             return None
 
         return {
@@ -116,6 +104,7 @@ async def resolve_token(token: str) -> dict | None:
             "username": user.username,
             "display_name": user.display_name,
             "timezone": user.timezone,
+            "onboarded": user.onboarded,
         }
 
 
@@ -142,4 +131,41 @@ async def get_user_by_id(user_id: int) -> dict | None:
         "username": user.username,
         "display_name": user.display_name,
         "timezone": user.timezone,
+        "onboarded": user.onboarded,
     }
+
+
+async def update_user_profile(
+    user_id: int,
+    display_name: str | None = None,
+    timezone_str: str | None = None,
+) -> dict:
+    """更新用户基础资料。None 表示不改该字段。"""
+    async with session_scope() as db:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user is None:
+            raise ValueError("用户不存在")
+
+        if display_name is not None:
+            user.display_name = display_name
+        if timezone_str is not None:
+            user.timezone = timezone_str
+
+        await db.flush()
+        return {
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
+            "timezone": user.timezone,
+            "onboarded": user.onboarded,
+        }
+
+
+async def mark_onboarded(user_id: int) -> None:
+    """标记用户已完成引导。"""
+    async with session_scope() as db:
+        result = await db.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user is not None:
+            user.onboarded = True
