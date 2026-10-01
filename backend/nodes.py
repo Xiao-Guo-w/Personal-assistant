@@ -151,6 +151,14 @@ def _format_confirmation(tool_name: str, args: dict) -> str:
             "即将创建提醒：\n"
             f"- 内容：{args.get('text')}\n"
             f"- 时间：{args.get('remind_at')}\n"
+            "到点后会发邮件并在应用内通知。\n"
+            "回复“确认”或“取消”。"
+        )
+    if tool_name == "cancel_reminder":
+        return (
+            "即将取消提醒：\n"
+            f"- 提醒 ID：{args.get('reminder_id') or '（按内容匹配）'}\n"
+            f"- 内容：{args.get('text') or '（未指定）'}\n"
             "回复“确认”或“取消”。"
         )
     if tool_name == "create_notion_page":
@@ -216,7 +224,14 @@ def _format_result(tool_name: str, result: dict) -> str:
     if tool_name == "search_email":
         return f"✅ 找到 {len(result.get('messages', []))} 封相关邮件"
     if tool_name == "create_reminder":
-        return f"✅ 提醒已设置：{result.get('reminder_id')}"
+        when = result.get("remind_at_local") or result.get("remind_at")
+        return f"✅ 提醒已设置：{result.get('text')}（{when}）"
+    if tool_name == "list_reminders":
+        return f"✅ 找到 {result.get('count', 0)} 条提醒"
+    if tool_name == "cancel_reminder":
+        if not result.get("cancelled"):
+            return f"⚠️ {result.get('message') or '没有找到匹配的提醒'}"
+        return f"✅ 已取消提醒：{result.get('text')}（{result.get('remind_at_local')}）"
     if tool_name == "create_notion_page":
         return f"✅ Notion 页面已创建：{result.get('title')}（{result.get('url')}）"
     if tool_name == "list_notion_pages":

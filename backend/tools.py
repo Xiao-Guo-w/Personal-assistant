@@ -10,8 +10,6 @@
 2. 需要用户级凭证隔离（user_id 传给 executor 处理）
 """
 
-import uuid
-
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
@@ -88,21 +86,48 @@ def send_email(to: str, subject: str, body: str) -> dict:
 
 
 # ============================================================
-# 提醒工具（mock）
+# 提醒工具（真实落库 + 后台调度投递）
+#
+# 真实实现见 backend/reminders.py：落库为 pending，
+# 由后台调度循环到点后发邮件 + 写站内收件箱。
 # ============================================================
 
 @tool
 def create_reminder(text: str, remind_at: str) -> dict:
-    """创建提醒。
+    """创建定时提醒。到点后会发邮件并在应用内通知用户。
 
     Args:
-        text: 提醒内容
-        remind_at: 提醒时间，ISO8601 带时区
+        text: 提醒内容，例如"交周报"
+        remind_at: 提醒时间，ISO8601 格式。用户说"今晚 8 点"这类相对时间要先换算成
+                   具体日期时间，并带上用户时区，例如 2026-10-02T20:00:00+08:00
     """
-    return {
-        "reminder_id": f"rem_{uuid.uuid4().hex[:8]}",
-        "text": text, "remind_at": remind_at, "status": "scheduled",
-    }
+    if not text:
+        raise ValueError("提醒内容不能为空")
+    return {"text": text, "remind_at": remind_at, "status": "pending"}
+
+
+@tool
+def list_reminders(status: str = "pending", limit: int = 10) -> dict:
+    """查询用户的提醒列表。
+
+    Args:
+        status: pending（待触发，默认）/ fired（已触发）/ cancelled（已取消）/ all（全部）
+        limit: 最多返回条数
+    """
+    return {"status": status, "limit": limit}
+
+
+@tool
+def cancel_reminder(reminder_id: str = "", text: str = "") -> dict:
+    """取消一个还没触发的提醒。
+
+    Args:
+        reminder_id: 提醒 ID，形如 rem_12（可先用 list_reminders 查出来）
+        text: 或者用提醒内容定位，例如"去钓鱼"（模糊匹配最近要触发的那条）
+    """
+    if not reminder_id and not text:
+        raise ValueError("请提供要取消的提醒 ID（rem_12）或提醒内容")
+    return {"reminder_id": reminder_id, "text": text, "status": "pending"}
 
 
 # ============================================================
@@ -214,6 +239,8 @@ ALL_TOOLS = [
     search_email,
     send_email,
     create_reminder,
+    list_reminders,
+    cancel_reminder,
     create_notion_page,
     list_notion_pages,
     update_notion_page,
@@ -227,6 +254,8 @@ TOOL_META: dict[str, dict] = {
     "search_email":           {"risk": "safe",    "retryable": True},
     "send_email":             {"risk": "confirm", "retryable": True},
     "create_reminder":        {"risk": "confirm", "retryable": True},
+    "list_reminders":         {"risk": "safe",    "retryable": True},
+    "cancel_reminder":        {"risk": "confirm", "retryable": True},
     "create_notion_page":     {"risk": "confirm", "retryable": True},
     "list_notion_pages":      {"risk": "safe",    "retryable": True},
     "update_notion_page":     {"risk": "confirm", "retryable": True},

@@ -147,6 +147,13 @@ async def execute_with_retry(
             idempotency_key, max_retries, meta,
         )
 
+    # ---------- 特判 5：提醒系列 ----------
+    if tool_name in ("create_reminder", "list_reminders", "cancel_reminder"):
+        return await _execute_reminder_tool(
+            session_id, tool_name, args, user_id,
+            idempotency_key, max_retries, meta,
+        )
+
     # ---------- 通用工具路径 ----------
     tool = TOOL_MAP.get(tool_name)
     if tool is None:
@@ -368,6 +375,79 @@ async def _execute_calendar_tool(
             await _audit(user_id, session_id, tool_name, args,
                          {"error": str(e)}, "failed")
             raise NonRetryableError(str(e))
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            will_retry = meta["retryable"] and i < max_retries - 1
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "retry" if will_retry else "failed")
+            if not will_retry:
+                raise
+            await asyncio.sleep(2 ** i + random.random())
+
+    raise last_err or RuntimeError("unknown error")
+
+
+async def _execute_reminder_tool(
+    session_id: str, tool_name: str, args: dict, user_id: int,
+    idempotency_key: str | None, max_retries: int, meta: dict,
+) -> dict:
+    """
+    提醒工具执行：落库 + 交给后台调度器投递。
+
+    提醒是真实副作用（会发邮件），所以和 Notion/邮箱一样走用户级数据 + 审计。
+    """
+    from .reminders import (
+        ReminderError, cancel_reminder, create_reminder, list_reminders,
+    )
+
+    if idempotency_key:
+        cached = await _cache_get(idempotency_key)
+        if cached is not None:
+            # 幂等命中：这次没有真的落库，留痕 + 标记，避免"看起来又建了一条"
+            flagged = {**cached, "deduplicated": True}
+            await _audit(user_id, session_id, tool_name, args, flagged, "cached")
+            return flagged
+
+    last_err: Exception | None = None
+    for i in range(max_retries):
+        try:
+            if tool_name == "create_reminder":
+                result = await create_reminder(
+                    user_id=user_id,
+                    text=args["text"],
+                    remind_at=args["remind_at"],
+                )
+            elif tool_name == "list_reminders":
+                result = await list_reminders(
+                    user_id=user_id,
+                    status=args.get("status", "pending"),
+                    limit=args.get("limit", 10),
+                )
+            elif tool_name == "cancel_reminder":
+                result = await cancel_reminder(
+                    user_id=user_id,
+                    reminder_id=args.get("reminder_id", ""),
+                    text=args.get("text", ""),
+                )
+            else:
+                raise NonRetryableError(f"未知提醒工具：{tool_name}")
+
+            if idempotency_key:
+                await _cache_set(idempotency_key, result)
+            await _audit(user_id, session_id, tool_name, args, result, "success")
+            return result
+
+        except ReminderError as e:
+            # 时间格式错 / 时间已过去 / 内容为空：参数问题，重试没用
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "failed")
+            raise NonRetryableError(str(e))
+        except _PROGRAMMING_ERRORS as e:
+            await _audit(user_id, session_id, tool_name, args,
+                         {"error": str(e)}, "failed")
+            raise NonRetryableError(f"工具内部错误：{e}") from e
+        except NonRetryableError:
+            raise
         except Exception as e:  # noqa: BLE001
             last_err = e
             will_retry = meta["retryable"] and i < max_retries - 1

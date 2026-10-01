@@ -6,6 +6,7 @@ ORM 模型定义。
 2. 业务辅助：Idempotency / AuditLog
 3. 长期记忆：UserMemory
 4. 集成配置：UserIntegration（config 中的敏感字段加密存储）
+5. 提醒：Reminder（后台调度器投递）
 
 LangGraph 的 checkpoints 表由官方 checkpointer 自己管理。
 """
@@ -164,3 +165,42 @@ class UserIntegration(Base):
 
     def __repr__(self) -> str:
         return f"<UserIntegration {self.user_id}:{self.provider}>"
+
+
+# ============================================================
+# 五、提醒
+# ============================================================
+
+class Reminder(Base):
+    """
+    定时提醒。
+
+    时间统一用 UTC（naive）存储，和 created_at 的 CURRENT_TIMESTAMP 保持一致；
+    展示和发信时再按用户时区换算，避免"存本地时间、算的时候又按 UTC"的经典坑。
+
+    status 流转：
+      pending   → 待触发
+      firing    → 已被调度器原子抢占，正在投递（防止多进程/重启重复投递）
+      fired     → 已投递
+      cancelled → 用户取消
+    """
+    __tablename__ = "reminders"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    remind_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    fired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 投递渠道组合，例如 "email+in_app"；留空表示还没投递过
+    fired_via: Mapped[str] = mapped_column(String(32), default="")
+    # 邮件投递失败的原因；站内通知不受影响
+    last_error: Mapped[str] = mapped_column(Text, default="")
+    # 站内通知是否已被"知道了"（为空表示还没看）
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<Reminder {self.id}:{self.status}:{self.text[:20]}>"

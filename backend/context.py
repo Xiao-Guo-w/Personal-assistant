@@ -92,6 +92,25 @@ def compact_tool_result(tool_name: str, result: dict) -> dict:
     if tool_name in ("create_notion_page", "update_notion_page", "archive_notion_page"):
         return result
 
+    if tool_name == "list_reminders":
+        # 提醒列表只保留可读字段，本地时间优先（remind_at_local）
+        items = result.get("reminders", [])
+        return {
+            "count": len(items),
+            "reminders": [
+                {
+                    "reminder_id": r.get("reminder_id"),
+                    "text": r.get("text"),
+                    "remind_at": r.get("remind_at_local") or r.get("remind_at"),
+                    "status": r.get("status"),
+                }
+                for r in items
+            ],
+        }
+
+    if tool_name in ("create_reminder", "cancel_reminder"):
+        return result
+
     raw = json.dumps(result, ensure_ascii=False)
     if len(raw) > settings.tool_result_max_chars:
         return {"truncated": raw[: settings.tool_result_max_chars] + "..."}

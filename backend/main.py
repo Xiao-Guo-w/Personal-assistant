@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+import asyncio
 import uuid
 from contextlib import asynccontextmanager
 
@@ -25,6 +26,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from .auth import current_user
+from .config import settings
 from .crypto import EncryptionError, _get_fernet
 from .db import close_db, init_db
 from .graph import close_graph, get_graph, init_graph
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI):
     1. 校验加密密钥（fail-fast）
     2. 初始化 ORM 引擎
     3. 初始化 LangGraph checkpointer
+    4. 启动提醒调度后台任务（可用配置关闭）
     关闭时逆序清理。
     """
     try:
@@ -63,7 +66,26 @@ async def lifespan(app: FastAPI):
 
     await init_db()
     await init_graph()
+
+    # 提醒调度：进程内后台循环，到点的提醒由它投递（邮件 + 站内）
+    reminder_stop: asyncio.Event | None = None
+    reminder_task: asyncio.Task | None = None
+    if settings.reminder_scheduler_enabled:
+        from .reminders import run_reminder_scheduler
+
+        reminder_stop = asyncio.Event()
+        reminder_task = asyncio.create_task(run_reminder_scheduler(reminder_stop))
+
     yield
+
+    # 先停调度循环，再关连接
+    if reminder_stop is not None:
+        reminder_stop.set()
+    if reminder_task is not None:
+        try:
+            await asyncio.wait_for(reminder_task, timeout=5)
+        except asyncio.TimeoutError:
+            reminder_task.cancel()
 
     from .notion_client_wrapper import close_all_clients
     await close_all_clients()
@@ -566,6 +588,52 @@ async def get_email_config(user: dict = Depends(current_user)):
         "auth_code_masked": mask(config.get("auth_code", ""), 6, 4),
         "configured": True,
     }
+
+
+# ============================================================
+# 提醒接口
+# ============================================================
+
+@app.get("/api/reminders")
+async def reminders_list(
+    status: str = "pending",
+    limit: int = 10,
+    user: dict = Depends(current_user),
+):
+    """查询提醒列表。status 取 pending / fired / cancelled / all。"""
+    from .reminders import list_reminders
+
+    return await list_reminders(user["id"], status, limit)
+
+
+@app.get("/api/reminders/inbox")
+async def reminders_inbox(user: dict = Depends(current_user)):
+    """
+    站内提醒通知：已触发但用户还没点"知道了"的提醒。
+
+    前端每隔几十秒轮询一次，到点的提醒就会在聊天页顶部冒出来。
+    """
+    from .reminders import list_inbox
+
+    return await list_inbox(user["id"])
+
+
+@app.post("/api/reminders/{reminder_id}/ack")
+async def reminders_ack(reminder_id: int, user: dict = Depends(current_user)):
+    """标记站内提醒为已知晓。"""
+    from .reminders import acknowledge_reminder
+
+    if not await acknowledge_reminder(user["id"], reminder_id):
+        raise HTTPException(404, "提醒不存在")
+    return {"ok": True}
+
+
+@app.post("/api/reminders/{reminder_id}/cancel")
+async def reminders_cancel(reminder_id: int, user: dict = Depends(current_user)):
+    """取消一条待触发的提醒（前端列表里的取消按钮走这里）。"""
+    from .reminders import cancel_reminder
+
+    return await cancel_reminder(user["id"], reminder_id=str(reminder_id))
 
 
 # ============================================================

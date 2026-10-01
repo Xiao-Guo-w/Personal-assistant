@@ -96,6 +96,24 @@ async def send_email(user_id: int, to: str, subject: str, body: str) -> dict:
     )
 
 
+async def send_self_email(user_id: int, subject: str, body: str) -> dict:
+    """
+    给用户自己发一封邮件（提醒投递用）。
+
+    收件人直接用配置里的邮箱地址，所以用户不需要额外填任何东西；
+    没配邮箱会抛 EmailNotConfiguredError，由调用方决定是否降级。
+    """
+    config = await _get_email_config(user_id)
+    return await asyncio.to_thread(
+        _send_email_sync,
+        config["address"],
+        config["auth_code"],
+        config["address"],
+        subject,
+        body,
+    )
+
+
 # ============================================================
 # 读取邮件（IMAP）
 # ============================================================

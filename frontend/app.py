@@ -381,6 +381,9 @@ def send_message(text: str):
 def render_chat_page():
     st.title("🤖 个人事务助理 Agent")
 
+    # 站内提醒通知：到点的提醒会在这里冒出来（每 30 秒自动刷新一次）
+    _render_reminder_inbox()
+
     if not st.session_state.current_session:
         st.info("请在左侧新建或选择一个会话开始对话。")
         return
@@ -695,7 +698,71 @@ def _render_oauth_tab(
 
 
 # ============================================================
-# 主入口路由
+# 提醒（站内通知 + 侧边栏管理）
+# ============================================================
+
+@st.fragment(run_every="30s")
+def _render_reminder_inbox():
+    """
+    站内提醒通知。
+
+    st.fragment(run_every=...) 让这个片段每 30 秒自己去问一次后端：
+    到点的提醒会直接出现在聊天页顶部，不需要手动刷新页面。
+    """
+    try:
+        r = _api_get("/api/reminders/inbox")
+    except Exception:  # noqa: BLE001 —— 后端没启动时不要让整页崩掉
+        return
+    if r.status_code != 200:
+        return
+
+    for item in r.json().get("reminders", []):
+        rid = item.get("id")
+        when = item.get("remind_at_local") or item.get("remind_at")
+        st.warning(f"⏰ **提醒**（{when}）：{item.get('text')}")
+        if item.get("last_error"):
+            st.caption(f"📧 {item['last_error']}")
+        if st.button("知道了", key=f"reminder_ack_{rid}"):
+            _api_post(f"/api/reminders/{rid}/ack")
+            st.rerun()
+
+
+def _render_sidebar_reminders():
+    """侧边栏的提醒管理：看待触发的提醒，可以直接取消。"""
+    try:
+        r = _api_get("/api/reminders?status=pending&limit=10")
+    except Exception:  # noqa: BLE001
+        return
+    if r.status_code != 200:
+        return
+
+    items = r.json().get("reminders", [])
+    with st.expander(f"⏰ 提醒（待触发 {len(items)}）", expanded=False):
+        if not items:
+            st.caption("暂无待触发的提醒。")
+            return
+
+        for item in items:
+            st.markdown(
+                f"**{item.get('text')}**  \n"
+                f"<small>{item.get('remind_at_local')}</small>",
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                "取消提醒",
+                key=f"reminder_cancel_{item['id']}",
+                use_container_width=True,
+            ):
+                resp = _api_post(f"/api/reminders/{item['id']}/cancel")
+                if resp.status_code == 200 and resp.json().get("cancelled"):
+                    st.toast("已取消提醒", icon="🗑️")
+                    st.rerun()
+                else:
+                    st.error(f"取消失败：{resp.text}")
+
+
+# ============================================================
+# 主入口路由（下方开始执行）
 # ============================================================
 
 # 1. 未登录
@@ -785,6 +852,9 @@ with st.sidebar:
                                use_container_width=True):
                     st.session_state.confirm_delete_session = None
                     st.rerun()
+
+    st.divider()
+    _render_sidebar_reminders()
 
     st.divider()
     st.subheader("个人")

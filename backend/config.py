@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     # 工具调用失败的最大重试次数（含首次）
     max_retries: int = 3
 
+    # ---------- 提醒调度 ----------
+    # 后台扫描间隔（秒）：越小越准时，越大越省资源；最小 5 秒
+    reminder_scan_interval_seconds: int = 30
+    # 关掉后提醒只落库不投递（本地调试用），默认开启
+    reminder_scheduler_enabled: bool = True
+
     # ---------- 上下文管理 ----------
     # Agnes 上下文窗口 512K，这里给业务侧留出充足但不过量的预算
     max_history_tokens: int = 32000
