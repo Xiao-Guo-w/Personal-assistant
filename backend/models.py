@@ -17,7 +17,9 @@ from sqlalchemy import (
     Boolean,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -208,3 +210,99 @@ class Reminder(Base):
 
     def __repr__(self) -> str:
         return f"<Reminder {self.id}:{self.status}:{self.text[:20]}>"
+
+
+# ============================================================
+# 六、知识库（RAG）
+#
+# 分工：
+# - kb_documents / kb_chunks：权威数据源，存正文与元数据
+# - kb_chunks.embedding：向量也留一份副本（见下），使 Chroma 成为"可离线重建的派生索引"
+# - kb_vec 不再由向量库承担：向量写进 Chroma，按 user_id 分 collection
+#
+# 为什么把向量副本存在 SQLite：
+# 1. 块级查重命中时可以复用已有向量，不再调用 embedding 服务（省钱）
+# 2. 换向量库 / 换 Chroma 的目录结构时，可以只重建索引，不用重新调用 embedding
+# 3. Chroma 整个删掉也不会丢数据，恢复时不依赖外部服务
+# ============================================================
+
+
+class KbDocument(Base):
+    """
+    知识库文档。一行 = 用户上传的一个文件。
+
+    status 流转：
+      pending   → 已登记，等待解析
+      indexing  → 解析完成，正在分块 / 向量化 / 写索引
+      ready     → 全部完成，可检索、可删除
+      failed    → 出错，展示原因，允许重试或删除
+
+    content_text 存规范化后的全文：
+    - 重试时不必要求用户重新上传
+    - 将来调整分块参数可以就地重建，不用重新解析原文件
+    因此原始文件不需要落盘保存。
+    """
+    __tablename__ = "kb_documents"
+    __table_args__ = (
+        UniqueConstraint("user_id", "content_hash", name="uq_kb_document_hash"),
+        Index("ix_kb_documents_user_status", "user_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    # 扩展名（不含点），如 pdf / docx / md / txt，前端按它分组
+    ext: Mapped[str] = mapped_column(String(16), default="")
+    mime: Mapped[str] = mapped_column(String(128), default="")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    char_count: Mapped[int] = mapped_column(Integer, default=0)
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    # sha256(规范化全文)，用于文档级查重
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    content_text: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    error: Mapped[str] = mapped_column(Text, default="")
+    # 记录向量化时用的模型与维度，换了模型要能检测出维度不匹配
+    embedding_model: Mapped[str] = mapped_column(String(128), default="")
+    embedding_dim: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<KbDocument {self.id}:{self.status}:{self.title[:20]}>"
+
+
+class KbChunk(Base):
+    """
+    知识库分块。
+
+    embedding 以 float32 小端序打包成 BLOB 存放。
+    为 NULL 表示这个块还没有向量（解析成功但向量化失败时会是这样）。
+    """
+    __tablename__ = "kb_chunks"
+    __table_args__ = (
+        Index("ix_kb_chunks_doc", "doc_id"),
+        Index("ix_kb_chunks_user_hash", "user_id", "content_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    doc_id: Mapped[int] = mapped_column(ForeignKey("kb_documents.id"), index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    # 块在文档内的顺序，相邻块合并时靠它判断连续性
+    idx: Mapped[int] = mapped_column(Integer)
+    text: Mapped[str] = mapped_column(Text)
+    # sha256(块文本)，块级查重用
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    embedding: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    dimension: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<KbChunk {self.id}:doc={self.doc_id}:idx={self.idx}>"

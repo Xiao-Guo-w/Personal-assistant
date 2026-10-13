@@ -13,12 +13,14 @@
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
+from .config import settings
+
 
 class CreateEventInput(BaseModel):
     """创建日程的输入 Schema。"""
     title: str = Field(description="日程标题")
-    start: str = Field(description="开始时间，ISO8601 带时区")
-    end: str = Field(description="结束时间，ISO8601 带时区")
+    start: str = Field(description="开始时间，ISO8601 带时区偏移（相对时间以系统提示里的当前时间为基准换算）")
+    end: str = Field(description="结束时间，ISO8601 带时区偏移（相对时间以系统提示里的当前时间为基准换算）")
     attendees: list[str] = Field(default_factory=list, description="参与人 ID 列表（飞书 open_id）")
     description: str = Field(default="", description="日程描述")
 
@@ -93,8 +95,9 @@ def schedule_email(to: str, subject: str, body: str, send_at: str) -> dict:
         to: 收件人邮箱
         subject: 邮件主题
         body: 邮件正文（纯文本）
-        send_at: 发送时间，ISO8601 格式。"明天早上 9 点"这类相对时间要先换算成
-                 具体日期时间并带用户时区，例如 2026-10-02T09:00:00+08:00
+        send_at: 发送时间，ISO8601 格式且必须带时区偏移，形如 YYYY-MM-DDTHH:MM:SS+08:00。
+                 "明天早上 9 点"这类相对时间以系统提示里的当前时间为基准换算，
+                 不要沿用对话历史里的日期。
     """
     if not to or not subject:
         raise ValueError("收件人和主题不能为空")
@@ -117,8 +120,9 @@ def create_reminder(text: str, remind_at: str) -> dict:
 
     Args:
         text: 提醒内容，例如"交周报"
-        remind_at: 提醒时间，ISO8601 格式。用户说"今晚 8 点"这类相对时间要先换算成
-                   具体日期时间，并带上用户时区，例如 2026-10-02T20:00:00+08:00
+        remind_at: 提醒时间，ISO8601 格式且必须带时区偏移，形如 YYYY-MM-DDTHH:MM:SS+08:00。
+                   用户说"今晚 8 点"这类相对时间以系统提示里的当前时间为基准换算，
+                   不要沿用对话历史里的日期。
     """
     if not text:
         raise ValueError("提醒内容不能为空")
@@ -249,6 +253,26 @@ def remember_preference(key: str, value: str) -> dict:
 
 
 # ============================================================
+# 知识库检索（真实实现见 backend/kb/search.py）
+# ============================================================
+
+@tool
+def search_knowledge_base(query: str, top_k: int = 5) -> dict:
+    """在用户上传的知识库文件中检索相关片段。
+
+    当问题可能和用户上传过的文件（产品文档、合同、笔记等）有关时，
+    先用这个工具查，再基于查到的原文回答。查不到就如实说没找到。
+
+    Args:
+        query: 检索语句。写清楚要查什么，不要把整个问题原样丢进来
+        top_k: 最多返回几个片段，默认 5
+    """
+    if not query.strip():
+        raise ValueError("检索语句不能为空")
+    return {"query": query, "top_k": top_k, "status": "pending"}
+
+
+# ============================================================
 # 注册表与元数据
 # ============================================================
 
@@ -268,6 +292,11 @@ ALL_TOOLS = [
     remember_preference,
 ]
 
+# 知识库关闭时不把检索工具下发给模型：模型看不见就不会去调，
+# 比"模型调了再报错"干净
+if settings.kb_enabled:
+    ALL_TOOLS.append(search_knowledge_base)
+
 TOOL_META: dict[str, dict] = {
     "list_calendar_events":   {"risk": "safe",    "retryable": True},
     "create_calendar_event":  {"risk": "confirm", "retryable": True},
@@ -282,6 +311,7 @@ TOOL_META: dict[str, dict] = {
     "update_notion_page":     {"risk": "confirm", "retryable": True},
     "archive_notion_page":    {"risk": "confirm", "retryable": True},
     "remember_preference":    {"risk": "safe",    "retryable": True},
+    "search_knowledge_base":  {"risk": "safe",    "retryable": True},
 }
 
 TOOL_MAP = {t.name: t for t in ALL_TOOLS}

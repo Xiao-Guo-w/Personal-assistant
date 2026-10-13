@@ -12,6 +12,9 @@
 *.db-shm
 *.db-wal
 
+# 知识库向量库（Chroma 持久化目录）
+/chroma_db/
+
 
 #缓存文件
 __pycache__/

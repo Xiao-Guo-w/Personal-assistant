@@ -53,6 +53,8 @@ type QueryValue = string | number | boolean | undefined | null
 
 interface RequestOptions {
   json?: unknown
+  /** multipart 上传。不要手写 Content-Type，浏览器要自己带 boundary */
+  formData?: FormData
   params?: Record<string, QueryValue>
   timeoutMs?: number
 }
@@ -102,10 +104,12 @@ async function request<T>(method: HttpMethod, path: string, options: RequestOpti
   const token = getToken()
   if (token) headers.Authorization = `Bearer ${token}`
 
-  let body: string | undefined
+  let body: BodyInit | undefined
   if (options.json !== undefined) {
     headers['Content-Type'] = 'application/json'
     body = JSON.stringify(options.json)
+  } else if (options.formData !== undefined) {
+    body = options.formData
   }
 
   const controller = new AbortController()
@@ -145,6 +149,109 @@ export const http = {
   put: <T>(path: string, options?: RequestOptions) => request<T>('PUT', path, options),
   patch: <T>(path: string, options?: RequestOptions) => request<T>('PATCH', path, options),
   delete: <T>(path: string, options?: RequestOptions) => request<T>('DELETE', path, options),
+}
+
+export interface SseEvent {
+  event: string
+  data: unknown
+}
+
+/** 解析一帧 SSE（已按空行切分）。返回 null 表示这帧没有 data 字段。 */
+function parseSseBlock(block: string): SseEvent | null {
+  let event = 'message'
+  const dataLines: string[] = []
+
+  for (const rawLine of block.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (!line || line.startsWith(':')) continue
+
+    const sep = line.indexOf(':')
+    const field = sep === -1 ? line : line.slice(0, sep)
+    let value = sep === -1 ? '' : line.slice(sep + 1)
+    if (value.startsWith(' ')) value = value.slice(1)
+
+    if (field === 'event') event = value
+    else if (field === 'data') dataLines.push(value)
+  }
+
+  if (!dataLines.length) return null
+  return { event, data: parseBody(dataLines.join('\n')) }
+}
+
+/**
+ * POST 一个 JSON 请求并逐条解析 SSE 响应。
+ *
+ * 不能直接用浏览器原生 EventSource：它只支持 GET，也没法带
+ * Authorization 头，而这里的对话接口既需要 POST 又需要鉴权。
+ */
+export async function streamPost(
+  path: string,
+  json: unknown,
+  onEvent: (event: SseEvent) => void,
+): Promise<void> {
+  const url = new URL(`${API_BASE}${path}`, window.location.origin)
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+  }
+  const token = getToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  let response: Response
+  try {
+    response = await fetch(url.toString(), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(json),
+    })
+  } catch {
+    throw new ApiError(0, '无法连接后端服务，请确认 uvicorn 已启动（默认 8000 端口）。')
+  }
+
+  if (response.status === 401) {
+    setToken(null)
+    notifyUnauthorized()
+    throw new ApiError(401, '登录已过期，请重新登录。')
+  }
+
+  if (!response.ok) {
+    const raw = await response.text()
+    throw new ApiError(
+      response.status,
+      extractDetail(raw ? parseBody(raw) : null, `请求失败（HTTP ${response.status}）`),
+    )
+  }
+
+  if (!response.body) {
+    throw new ApiError(0, '当前浏览器不支持流式读取响应。')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      let index: number
+      while ((index = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, index)
+        buffer = buffer.slice(index + 2)
+        const parsed = parseSseBlock(block)
+        if (parsed) onEvent(parsed)
+      }
+    }
+  } finally {
+    // 正常读完时是空操作；回调抛错（如服务端 error 事件）时及时断开
+    try {
+      await reader.cancel()
+    } catch {
+      /* 流已结束 */
+    }
+  }
 }
 
 /** 判断错误是不是「资源不存在」，用于把 404 当成空状态处理。 */

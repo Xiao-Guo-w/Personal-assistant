@@ -16,7 +16,8 @@ from langchain_core.messages import (
 
 from .config import settings
 from .context import (
-    SUMMARY_PROMPT, build_system_msg, compact_tool_result, trim_history,
+    SUMMARY_PROMPT, attach_time_hint, build_system_msg, compact_tool_result,
+    trim_history,
 )
 from .executor import _audit, execute_with_retry, make_idempotency_key
 from .llm import get_llm
@@ -98,33 +99,88 @@ def _last_human_text(messages: list[BaseMessage]) -> str:
     return ""
 
 
-def _guard_reply(ai_msg: AIMessage, messages: list[BaseMessage]) -> AIMessage:
+def _recent_dialogue(messages: list[BaseMessage], limit: int = 6) -> str:
     """
-    拦截模型"演"出来的回复。
+    最近几轮对话的紧凑文本，供知识库检索做查询改写（消解指代）。
 
-    两种情况一定不是真实执行结果：
-    1. 模型自己产出确认文案（"回复确认或取消"）——这段只能由平台生成
-    2. 用户刚说"确认"或刚下了执行指令，模型没调用工具却宣称已完成
+    平台生成的消息（确认文案、执行结果）要排除掉：那些是系统写的，
+    混进去只会干扰改写模型判断"用户到底在问什么"。
     """
-    if ai_msg.tool_calls:
-        return ai_msg
+    turns: list[str] = []
+    for m in messages:
+        if isinstance(m, HumanMessage):
+            role = "用户"
+        elif isinstance(m, AIMessage):
+            if (m.additional_kwargs or {}).get(_SYSTEM_FLAG):
+                continue
+            role = "助手"
+        else:
+            continue
 
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        content = content.strip()
+        if not content:
+            continue
+        turns.append(f"{role}：{content[:200]}")
+
+    return "\n".join(turns[-limit:])
+
+
+def _guard_reply(
+    ai_msg: AIMessage, messages: list[BaseMessage],
+) -> tuple[AIMessage, str | None]:
+    """
+    拦截模型"演"出来的回复。返回 (处理后的消息, 拦截原因)；未拦截时原因为 None。
+
+    两类内容只可能来自真实执行，模型自己写出来就是幻觉：
+    1. 确认文案（"回复确认或取消"）——这段只能由平台生成
+    2. 完成文案（"已发送 / 已创建"）——必须等工具真的返回结果
+
+    带 tool_calls 时**不能整条替换**：那样会把工具调用一起丢掉，动作就真的
+    不会执行了。此时只清掉抢跑的文本、保留 tool_calls，真正的结果文案交由
+    平台（确认文案）或 summarize 节点补上。
+
+    以前这一分支是直接 `return ai_msg`，于是"文本 + tool_calls"这种最常见的
+    工具调用形态完全绕过检查：假完成文案会被写进历史、并随流式输出播给用户。
+    """
     content = ai_msg.content if isinstance(ai_msg.content, str) else str(ai_msg.content)
     if not content:
-        return ai_msg
+        return ai_msg, None
 
+    # 确认文案：模型无论有没有工具调用都不该写
     if any(marker in content for marker in _CONFIRM_PROMPT_MARKERS):
-        return AIMessage(content=FABRICATION_NOTICE)
+        if ai_msg.tool_calls:
+            return _drop_claim(ai_msg), "confirm_prompt_leak_with_tools"
+        return AIMessage(content=FABRICATION_NOTICE), "confirm_prompt_leak"
 
-    if any(marker in content for marker in _COMPLETION_MARKERS):
-        human_text = _last_human_text(messages).strip().lower()
-        is_confirm_reply = human_text in CONFIRM_WORDS
-        is_question = any(hint in human_text for hint in _QUESTION_HINTS)
-        wants_action = any(hint in human_text for hint in _ACTION_HINTS)
-        if not is_question and (is_confirm_reply or wants_action):
-            return AIMessage(content=FABRICATION_NOTICE)
+    if not any(marker in content for marker in _COMPLETION_MARKERS):
+        return ai_msg, None
 
-    return ai_msg
+    human_text = _last_human_text(messages).strip().lower()
+    if any(hint in human_text for hint in _QUESTION_HINTS):
+        # 用户在"问做没做"（例如"邮件发了吗"），可能是在追问以前的操作，
+        # 不是要求执行，不能误判
+        return ai_msg, None
+
+    if ai_msg.tool_calls:
+        # 带 tool_calls 时工具还没执行，同一条消息里就写"已完成" = 抢跑。
+        # 这里不必再判断"用户是否要求动作"：真实结果只能由平台（确认文案）
+        # 或 summarize 在工具返回之后生成，本轮此刻不可能已经完成。
+        # 清掉文本、保留 tool_calls，动作照常继续 —— 否则会因为 _ACTION_HINTS
+        # 这类关键词表不全（例如"帮我约张三明天开会"里没有命中词）而漏判。
+        return _drop_claim(ai_msg), "claimed_done_with_tools"
+
+    is_confirm_reply = human_text in CONFIRM_WORDS
+    wants_action = any(hint in human_text for hint in _ACTION_HINTS)
+    if is_confirm_reply or wants_action:
+        return AIMessage(content=FABRICATION_NOTICE), "claimed_done_without_tools"
+
+    return ai_msg, None
+
+
+def _drop_claim(ai_msg: AIMessage) -> AIMessage:
+    """清掉模型抢跑的文本，保留其它字段（tool_calls / id / 元数据）。"""
+    return ai_msg.model_copy(update={"content": ""})
 
 
 def _format_confirmation(tool_name: str, args: dict) -> str:
@@ -289,17 +345,44 @@ def route_after_llm(state: AgentState) -> str:
 # 节点函数
 # ============================================================
 
+def _summary_cut(messages: list[BaseMessage], keep_recent: int) -> int:
+    """
+    选择摘要裁剪点：messages[:cut] 交给摘要模型，messages[cut:] 原样保留。
+
+    裁剪点必须落在用户消息上，这样两边都不会被切坏：
+    - 交给摘要的部分不会以"有 tool_calls 却没有工具回执"结尾
+      （否则部分 provider 会因非法对话直接 400）
+    - 保留的部分不会以孤儿 ToolMessage 开头
+
+    以前是按条数硬切（msgs[:-keep]），切点一旦落在 AIMessage(tool_calls)
+    与它的 ToolMessage 之间，上面两个坑会同时踩到 —— 长会话必然触发。
+
+    返回 0 表示不裁剪（没有合适的位置，或本来就不够长）。
+    """
+    keep_recent = max(1, keep_recent)
+    if len(messages) <= keep_recent:
+        return 0
+
+    # cut 是"保留部分的起点"，因此 cut <= len - keep_recent 才能保证
+    # 至少留下 keep_recent 条；从右往左找第一个用户消息，尽量多摘掉旧消息
+    limit = len(messages) - keep_recent
+    for cut in range(limit, 0, -1):
+        if isinstance(messages[cut], HumanMessage):
+            return cut
+    return 0
+
+
 async def prepare_context_node(state: AgentState) -> dict:
     """Layer 3：旧消息摘要。"""
     msgs = state["messages"]
     if len(msgs) < settings.summarize_threshold:
         return {}
 
-    keep = settings.summarize_keep_recent
-    old = msgs[:-keep]
-    if not old:
+    cut = _summary_cut(msgs, settings.summarize_keep_recent)
+    if cut <= 0:
         return {}
 
+    old = msgs[:cut]
     summary_msg = await _llm.ainvoke(
         [SystemMessage(content=SUMMARY_PROMPT), *old]
     )
@@ -315,21 +398,23 @@ async def prepare_context_node(state: AgentState) -> dict:
 
 async def llm_node(state: AgentState) -> dict:
     """调用绑定工具的 LLM（并拦住"没调工具却说已完成"的回复）。"""
+    timezone_str = state.get("timezone", "Asia/Shanghai")
     system_msg = await build_system_msg(
-        state["user_id"], state.get("timezone", "Asia/Shanghai"),
+        state["user_id"], timezone_str,
     )
     trimmed = trim_history(state["messages"])
-    msgs = [system_msg] + _to_model_view(trimmed)
+    # 当前时间贴在用户最新一条消息前：老会话里历史时间密布，只靠系统提示会被盖过去
+    msgs = [system_msg] + attach_time_hint(_to_model_view(trimmed), timezone_str)
 
     ai_msg: AIMessage = await _llm_with_tools.ainvoke(msgs)
 
-    guarded = _guard_reply(ai_msg, state["messages"])
-    if guarded is not ai_msg:
+    guarded, blocked_reason = _guard_reply(ai_msg, state["messages"])
+    if blocked_reason:
         # 被拦下的"演戏"回复要留痕，方便事后在审计里查（状态 blocked）
         await _audit(
             state["user_id"], state["session_id"], "assistant_reply_guard",
             {"reply": (ai_msg.content or "")[:300]},
-            {"action": "blocked", "reason": "no_tool_call_but_claimed_done"},
+            {"action": "blocked", "reason": blocked_reason},
             "blocked",
         )
         return {"messages": [guarded]}
@@ -355,6 +440,8 @@ async def prepare_confirmation_node(state: AgentState) -> dict:
     safe_msgs: list[ToolMessage] = []
     queue: list[dict] = []
     queued_ids: list[str] = []
+    # 安全工具里可能包含知识库检索，需要对话上下文做查询改写
+    dialogue = _recent_dialogue(state["messages"])
 
     for tc in last_ai.tool_calls:
         if get_tool_meta(tc["name"])["risk"] != "confirm":
@@ -363,6 +450,7 @@ async def prepare_confirmation_node(state: AgentState) -> dict:
                 result = await execute_with_retry(
                     state["session_id"], tc["name"], tc["args"],
                     user_id=state["user_id"],
+                    dialogue=dialogue,
                 )
             except Exception as e:  # noqa: BLE001
                 result = {"error": str(e)}
@@ -420,6 +508,7 @@ async def prepare_confirmation_node(state: AgentState) -> dict:
 async def execute_safe_tool_node(state: AgentState) -> dict:
     """安全操作：逐个执行本轮所有工具调用 + 压缩结果。"""
     last_ai: AIMessage = state["messages"][-1]
+    dialogue = _recent_dialogue(state["messages"])
 
     tool_msgs: list[ToolMessage] = []
     for tc in last_ai.tool_calls:
@@ -427,6 +516,7 @@ async def execute_safe_tool_node(state: AgentState) -> dict:
             result = await execute_with_retry(
                 state["session_id"], tc["name"], tc["args"],
                 user_id=state["user_id"],
+                dialogue=dialogue,
             )
         except Exception as e:  # noqa: BLE001
             result = {"error": str(e)}

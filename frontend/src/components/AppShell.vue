@@ -14,6 +14,7 @@ const route = useRoute()
 
 const navItems = [
   { name: 'chat', label: '聊天', icon: '💬' },
+  { name: 'kb', label: '知识库', icon: '📚' },
   { name: 'memory', label: '长期记忆', icon: '📖' },
   { name: 'settings', label: '集成设置', icon: '⚙️' },
 ] as const

@@ -34,9 +34,30 @@ async def init_db() -> None:
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
         await conn.exec_driver_sql("PRAGMA synchronous=NORMAL")
         await conn.run_sync(Base.metadata.create_all)
+        # FTS5 虚表不在 ORM 元数据里，必须手写；rowid 与 kb_chunks.id 对齐
+        await conn.run_sync(_create_kb_fts)
         # create_all 只建缺失的表，不会给已存在的表补列；
         # 这里对后加的列做一次幂等 ALTER TABLE（见 _apply_light_migrations）
         await conn.run_sync(_apply_light_migrations)
+
+
+def _create_kb_fts(conn) -> None:
+    """
+    知识库用的 FTS5 虚表（关键词检索通道）。
+
+    用 trigram 分词器：SQLite 默认的 unicode61 不切分中文，整句会被当成
+    一个 token，中文检索基本失效。trigram 按 3 字符滑窗切分，中文可用。
+
+    注意 trigram 的固有约束：MATCH 的查询串至少 3 个字符，
+    "邮件""日程"这类两字查询匹配不到 —— search 层对此有 LIKE 降级。
+
+    正文在 kb_chunks 里也存了一份，这里不做 external content 表，
+    换取"不需要触发器同步"的简单与可靠。
+    """
+    conn.exec_driver_sql(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS kb_fts "
+        "USING fts5(text, tokenize='trigram')"
+    )
 
 
 def _apply_light_migrations(conn) -> None:

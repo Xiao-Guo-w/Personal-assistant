@@ -3,6 +3,7 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { getToken, onUnauthorized } from '@/api'
 import { authState, refreshMe, resetAuth } from '@/stores/auth'
 import { resetChat } from '@/stores/chat'
+import { resetKb } from '@/stores/kb'
 import { resetReminders } from '@/stores/reminders'
 
 const routes: RouteRecordRaw[] = [
@@ -20,6 +21,7 @@ const routes: RouteRecordRaw[] = [
   },
   { path: '/', name: 'chat', component: () => import('@/views/ChatView.vue') },
   { path: '/memory', name: 'memory', component: () => import('@/views/MemoryView.vue') },
+  { path: '/kb', name: 'kb', component: () => import('@/views/KnowledgeView.vue') },
   { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
@@ -56,6 +58,7 @@ router.beforeEach(async (to) => {
 onUnauthorized(() => {
   resetAuth()
   resetChat()
+  resetKb()
   resetReminders()
   if (router.currentRoute.value.name !== 'login') {
     void router.replace({ name: 'login' })

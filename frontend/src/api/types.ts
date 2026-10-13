@@ -43,6 +43,18 @@ export interface ChatResponse {
   pending_action: PendingAction | null
 }
 
+/** 流式对话的回调集合（见 sessionApi.chatStream）。 */
+export interface ChatStreamHandlers {
+  /** 增量文本：追加到当前气泡 */
+  onToken?: (text: string) => void
+  /** 整条替换：平台生成的文案，或防幻觉校正后的最终文本 */
+  onReplace?: (text: string) => void
+  /** 进度提示：等待期间的状态行（如"正在检索知识库…"），有正文后即失效 */
+  onStep?: (text: string) => void
+  /** 本轮结束：带上确认状态，供前端决定是否弹确认栏 */
+  onDone?: (payload: { status: ChatStatus; pendingAction: PendingAction | null }) => void
+}
+
 export interface SessionDetail {
   id: string
   stage: string | null
@@ -130,4 +142,66 @@ export interface ReminderInboxResponse {
 export interface CancelReminderResponse {
   cancelled: boolean
   message?: string
+}
+
+/* ---------- 知识库 ---------- */
+
+/** 入库状态。前端据此决定文案与可用操作（进行中不可删）。 */
+export type KbDocStatus = 'pending' | 'indexing' | 'ready' | 'failed'
+
+export interface KbDocument {
+  id: number
+  title: string
+  /** 扩展名（不含点），如 pdf / docx / md / txt，用于分组 */
+  ext: string
+  mime: string
+  size_bytes: number
+  char_count: number
+  chunk_count: number
+  status: KbDocStatus
+  error: string
+  embedding_model: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+export interface KbChunk {
+  id: number
+  idx: number
+  text: string
+  token_count: number
+  has_vector: boolean
+}
+
+export interface KbStats {
+  documents: number
+  chunks: number
+  chars: number
+  vectors: number
+  vector_configured: boolean
+  embedding_model: string
+  embedding_dim: number
+}
+
+export interface KbHit {
+  doc_id: number
+  source: string
+  chunk_id: number
+  score: number
+  /** 原始余弦相似度；null 表示这条只被关键词通道命中 */
+  similarity: number | null
+  tokens: number
+  text: string
+}
+
+export interface KbSearchResponse {
+  query: string
+  count: number
+  hits: KbHit[]
+}
+
+export interface KbRebuildResponse {
+  chunks: number
+  vectors: number
+  reembedded: number
 }

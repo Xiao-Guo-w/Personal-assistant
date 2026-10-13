@@ -100,6 +100,7 @@ async def execute_with_retry(
     user_id: int,
     idempotency_key: str | None = None,
     max_retries: int | None = None,
+    dialogue: str = "",
 ) -> dict:
     """
     异步执行工具：幂等 → 重试 → 审计。
@@ -108,6 +109,9 @@ async def execute_with_retry(
     1. 幂等：先查缓存，命中直接返回
     2. 重试：只对可重试工具重试，指数退避 + 抖动
     3. 审计：无论成功失败都落一条日志
+
+    dialogue：最近几轮对话的紧凑文本，只有知识库检索会用到
+    （查询改写要消解多轮对话里的指代）。
     """
     meta = get_tool_meta(tool_name)
     max_retries = max_retries or settings.max_retries
@@ -156,6 +160,12 @@ async def execute_with_retry(
             idempotency_key, max_retries, meta,
         )
 
+    # ---------- 特判 6：知识库检索 ----------
+    if tool_name == "search_knowledge_base":
+        return await _execute_kb_tool(
+            session_id, tool_name, args, user_id, dialogue,
+        )
+
     # ---------- 通用工具路径 ----------
     tool = TOOL_MAP.get(tool_name)
     if tool is None:
@@ -191,6 +201,79 @@ async def execute_with_retry(
             await asyncio.sleep(2 ** i + random.random())
 
     raise last_err or RuntimeError("unknown error")
+
+
+async def _execute_kb_tool(
+    session_id: str,
+    tool_name: str,
+    args: dict,
+    user_id: int,
+    dialogue: str = "",
+) -> dict:
+    """
+    知识库检索执行。
+
+    刻意**不走幂等缓存**：检索是只读且廉价的，而幂等键包含 session_id，
+    一旦缓存就会让"同一会话里重复问同一个问题"永远返回旧结果 ——
+    用户刚补传了新文件、再问一次还是搜不到，只会以为入库失败。
+
+    也不走重试循环：网络层重试已经在 Embedder 内部处理，
+    检索本身是本地查询，失败基本是配置或数据问题，重试没有意义。
+    """
+    from .config import settings
+
+    if not settings.kb_enabled:
+        raise NonRetryableError("知识库功能未启用")
+
+    query = (args.get("query") or "").strip()
+    if not query:
+        raise NonRetryableError("检索语句为空")
+
+    try:
+        top_k = int(args.get("top_k") or settings.kb_top_k)
+    except (TypeError, ValueError):
+        top_k = settings.kb_top_k
+    top_k = max(1, min(top_k, 20))
+
+    # 多轮对话里用户可能只说"那它呢"：先把指代消解成自包含语句。
+    # 改写结果与原始 query **一起**检索，不替换原话 ——
+    # 改写会引入幻觉，只留改写结果等于把幻觉请进结果集。
+    extra_queries: list[str] = []
+    if settings.kb_query_rewrite:
+        from .kb.rewrite import rewrite_query
+
+        rewritten = await rewrite_query(query, dialogue)
+        if rewritten:
+            extra_queries.append(rewritten)
+
+    from .kb.search import search
+
+    try:
+        hits = await search(
+            user_id, query, top_k=top_k, extra_queries=extra_queries,
+        )
+    except Exception as e:  # noqa: BLE001
+        await _audit(user_id, session_id, tool_name, args, {"error": str(e)}, "failed")
+        raise NonRetryableError(f"知识库检索失败：{e}") from e
+
+    await _audit(
+        user_id, session_id, tool_name, args,
+        {"query": query, "rewritten": extra_queries, "count": len(hits)},
+        "success",
+    )
+
+    return {
+        "query": query,
+        "count": len(hits),
+        "hits": [
+            {
+                "source": hit["title"],
+                "text": hit["text"][: settings.kb_snippet_max_chars],
+            }
+            for hit in hits
+        ],
+        "note": "" if hits else "知识库里没有找到相关内容，请如实告知用户，不要编造",
+    }
 
 
 async def _execute_notion_tool(

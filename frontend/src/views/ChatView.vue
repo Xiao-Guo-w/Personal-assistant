@@ -14,7 +14,15 @@ async function scrollToBottom(): Promise<void> {
   if (element) element.scrollTop = element.scrollHeight
 }
 
-watch(() => [chatState.messages.length, chatState.sending], scrollToBottom)
+watch(
+  () => [
+    chatState.messages.length,
+    chatState.sending,
+    chatState.streamingContent,
+    chatState.streamingStep,
+  ],
+  scrollToBottom,
+)
 watch(() => chatState.currentSessionId, scrollToBottom)
 
 async function submit(): Promise<void> {
@@ -76,9 +84,19 @@ async function handleConfirm(approve: boolean): Promise<void> {
           </div>
         </div>
 
-        <div v-if="chatState.sending" class="msg msg-assistant">
+        <div v-if="chatState.streamingContent" class="msg msg-assistant">
           <div class="avatar">🤖</div>
-          <div class="bubble typing"><span /><span /><span /></div>
+          <div class="bubble"><MarkdownText :content="chatState.streamingContent" /></div>
+        </div>
+
+        <div v-else-if="chatState.sending" class="msg msg-assistant">
+          <div class="avatar">🤖</div>
+          <div class="bubble typing">
+            <span /><span /><span />
+            <em v-if="chatState.streamingStep" class="typing-step">
+              {{ chatState.streamingStep }}
+            </em>
+          </div>
         </div>
       </template>
     </div>

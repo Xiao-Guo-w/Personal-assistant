@@ -21,11 +21,10 @@ from sqlalchemy import select, update
 from .config import settings
 from .db import session_scope
 from .models import Reminder, User
+from .timeutil import DEFAULT_TZ, iso_example, now_text, safe_zone
 
 
 logger = logging.getLogger("assistant.reminders")
-
-DEFAULT_TZ = "Asia/Shanghai"
 
 # 查询用的状态白名单（all 表示不过滤）；failed 专指"该发出去但没发成功"
 VALID_STATUSES = ("pending", "fired", "failed", "cancelled", "all")
@@ -46,10 +45,7 @@ def _now_utc() -> datetime:
 
 def _zone(tz_name: str) -> ZoneInfo:
     """安全地取时区，名称非法时退回默认时区。"""
-    try:
-        return ZoneInfo(tz_name or DEFAULT_TZ)
-    except Exception:  # noqa: BLE001 —— 时区名写错不该让提醒创建失败
-        return ZoneInfo(DEFAULT_TZ)
+    return safe_zone(tz_name)
 
 
 def parse_remind_at(raw: str, tz_name: str = DEFAULT_TZ) -> datetime:
@@ -59,19 +55,24 @@ def parse_remind_at(raw: str, tz_name: str = DEFAULT_TZ) -> datetime:
     - 带时区（2026-10-02T10:00:00+08:00 / ...Z）→ 直接换算
     - 不带时区（2026-10-02T10:00:00）→ 按用户时区解释
     - 明显过去的时间 → 报错（提醒设在过去没有意义）
+
+    报错里一律带上"现在是几点"：老会话里模型容易把"现在"算到对话当初那天，
+    只回一句"时间已经过去了"，它下一次还是照着错的日期算；把当前时间写进去，
+    它才有可能自己纠正过来。
     """
     text = (raw or "").strip()
     if not text:
         raise ReminderError(
-            "缺少提醒/发送时间，请给出具体时间（例如 2026-10-02T10:00:00+08:00）。"
+            "缺少提醒/发送时间：请给出 ISO8601 格式的具体时间并带时区偏移，"
+            f"例如 {iso_example(tz_name)}。"
         )
 
     try:
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as e:
         raise ReminderError(
-            f"无法识别的时间格式「{raw}」，请用 ISO8601，"
-            "例如 2026-10-02T10:00:00+08:00。"
+            f"无法识别的时间格式「{raw}」：请用 ISO8601 并带时区偏移，"
+            f"例如 {iso_example(tz_name)}。"
         ) from e
 
     if dt.tzinfo is None:
@@ -81,7 +82,11 @@ def parse_remind_at(raw: str, tz_name: str = DEFAULT_TZ) -> datetime:
 
     # 给 60 秒宽限：模型偶尔会把"现在"算得差几秒
     if utc < _now_utc() - timedelta(seconds=60):
-        raise ReminderError("提醒时间已经过去了，请给一个未来的时间。")
+        raise ReminderError(
+            f"提醒时间已经过去了：算出来的是 {to_iso_utc(utc)}，"
+            f"而现在是 {now_text(tz_name)}。"
+            "请以现在为准重新给一个未来的时间。"
+        )
     return utc
 
 
