@@ -72,41 +72,56 @@ export interface MemoryItem {
   updated_at: string | null
 }
 
-export interface FeishuStatus {
-  connected: boolean
-  name?: string
-  open_id?: string
-}
-
-export interface NotionStatus {
-  connected: boolean
-  workspace_name?: string
-  workspace_id?: string
-  default_parent_page_id?: string
-}
-
 export interface EmailStatus {
   connected: boolean
   address?: string
 }
 
+/** 集成状态：只保留用户绑定的 QQ 邮箱（日程与提醒都在系统内部）。 */
 export interface IntegrationStatus {
-  feishu_calendar: FeishuStatus
-  notion: NotionStatus
   email: EmailStatus
-}
-
-export interface NotionPage {
-  id: string
-  title: string
-  is_top_level?: boolean
-  url?: string
 }
 
 export interface EmailConfig {
   address: string
   auth_code_masked: string
   configured: boolean
+}
+
+/* ---------- 日程 ---------- */
+
+export type ScheduleStatus = 'active' | 'cancelled'
+
+export interface Schedule {
+  id: number
+  schedule_id: string
+  title: string
+  start_at: string
+  start_at_local: string
+  end_at: string
+  end_at_local: string
+  location: string
+  description: string
+  status: ScheduleStatus
+  /** 关联的提醒 ID（形如 rem_12）；空串表示这条日程没有提醒 */
+  reminder_id: string
+  created_at: string | null
+}
+
+export interface ScheduleListResponse {
+  count: number
+  status?: string
+  from_local?: string
+  to_local?: string
+  schedules: Schedule[]
+}
+
+export interface CancelScheduleResponse {
+  cancelled: boolean
+  message?: string
+  title?: string
+  start_at_local?: string
+  cancelled_reminders?: number
 }
 
 export type ReminderKind = 'reminder' | 'email'
@@ -116,6 +131,8 @@ export interface Reminder {
   id: number
   reminder_id: string
   kind: ReminderKind
+  /** 关联的日程 ID；0 表示这是普通提醒 */
+  schedule_id: number
   text: string
   to: string
   subject: string

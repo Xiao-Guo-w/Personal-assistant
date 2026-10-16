@@ -37,12 +37,8 @@ MEMORY_KEY_META: dict[str, dict] = {
         "label": "工作结束时间", "category": "时间与日程",
         "icon": "🌆", "format": "time_hhmm",
     },
-    "preferred_calendar": {
-        "label": "默认日历", "category": "时间与日程",
-        "icon": "📅", "format": "plain",
-    },
     "default_reminder_advance": {
-        "label": "默认提前提醒", "category": "时间与日程",
+        "label": "默认提前提醒（分钟）", "category": "时间与日程",
         "icon": "🔔", "format": "duration_minutes",
     },
     # ---------- 常用联系人 ----------
@@ -63,16 +59,11 @@ MEMORY_KEY_META: dict[str, dict] = {
         "label": "邮件回复语气", "category": "沟通与邮件",
         "icon": "🎭", "format": "plain",
     },
-    # ---------- 工具与集成 ----------
-    "notion_parent_page": {
-        "label": "默认 Notion 父页面", "category": "工具与集成",
-        "icon": "📝", "format": "plain",
-    },
 }
 
 
 CATEGORY_ORDER = [
-    "时间与日程", "常用联系人", "沟通与邮件", "工具与集成", "其他",
+    "时间与日程", "常用联系人", "沟通与邮件", "其他",
 ]
 
 

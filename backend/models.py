@@ -6,7 +6,8 @@ ORM 模型定义。
 2. 业务辅助：Idempotency / AuditLog
 3. 长期记忆：UserMemory
 4. 集成配置：UserIntegration（config 中的敏感字段加密存储）
-5. 提醒：Reminder（后台调度器投递）
+5. 日程：Schedule（系统内自建，不走第三方日历 API）
+6. 提醒：Reminder（后台调度器投递，通过用户绑定的 QQ 邮箱通知）
 
 LangGraph 的 checkpoints 表由官方 checkpointer 自己管理。
 """
@@ -170,12 +171,55 @@ class UserIntegration(Base):
 
 
 # ============================================================
-# 五、提醒
+# 五、日程
+# ============================================================
+
+class Schedule(Base):
+    """
+    系统内的日程（不依赖任何第三方日历 API）。
+
+    时间口径和 Reminder 完全一致：UTC（naive）入库，展示/发信时按用户时区换算。
+
+    status 流转：
+      active    → 有效
+      cancelled → 用户取消（软删除，保留记录便于回溯）
+
+    日程本身不会自己"响"：需要在某个时间点通知用户时，由 schedules 服务
+    顺带建一条 kind=reminder、schedule_id 指向本行的提醒，
+    交给后台调度器通过用户绑定的 QQ 邮箱投递。
+    """
+    __tablename__ = "schedules"
+    __table_args__ = (
+        Index("ix_schedules_user_start", "user_id", "start_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(200))
+    start_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    # 结束时间可空：用户说"下午 3 点开会"但没给时长时，交给默认时长补算后再写入
+    end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    location: Mapped[str] = mapped_column(String(200), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(),
+    )
+
+    def __repr__(self) -> str:
+        return f"<Schedule {self.id}:{self.status}:{self.title[:20]}>"
+
+
+# ============================================================
+# 六、提醒
 # ============================================================
 
 class Reminder(Base):
     """
-    定时提醒。
+    定时提醒（通过用户绑定的 QQ 邮箱 + 站内收件箱投递）。
 
     时间统一用 UTC（naive）存储，和 created_at 的 CURRENT_TIMESTAMP 保持一致；
     展示和发信时再按用户时区换算，避免"存本地时间、算的时候又按 UTC"的经典坑。
@@ -192,7 +236,10 @@ class Reminder(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     # 任务类型：reminder=到点通知自己；email=到点把邮件发给收件人
     kind: Mapped[str] = mapped_column(String(16), default="reminder", index=True)
-    # 定时邮件的内容（JSON：to / subject / body）；提醒类为空
+    # 关联的日程 ID：日程提醒非空，普通提醒为空
+    schedule_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # 定时邮件的内容（JSON：to / subject / body）；
+    # 日程提醒存 {"remind_minutes": n}（改期时靠它把提醒一起挪）
     payload_json: Mapped[str] = mapped_column(Text, default="")
     text: Mapped[str] = mapped_column(Text)
     remind_at: Mapped[datetime] = mapped_column(DateTime, index=True)

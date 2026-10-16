@@ -3,6 +3,7 @@
 import { ApiError, http, isNotFound, streamPost } from './http'
 import type {
   AuthResponse,
+  CancelScheduleResponse,
   CancelReminderResponse,
   ChatStatus,
   ChatStreamHandlers,
@@ -14,10 +15,10 @@ import type {
   KbSearchResponse,
   KbStats,
   MemoryItem,
-  NotionPage,
   PendingAction,
   ReminderInboxResponse,
   ReminderListResponse,
+  ScheduleListResponse,
   SessionDetail,
   SessionMeta,
   User,
@@ -89,18 +90,6 @@ export const integrationApi = {
   status: () => http.get<IntegrationStatus>('/api/integrations/status'),
   disconnect: (provider: string) => http.delete<{ ok: boolean }>(`/api/integrations/${provider}`),
 
-  authorizeUrl: (provider: 'feishu' | 'notion') =>
-    http.get<{ authorize_url: string; state: string }>(`/api/oauth/${provider}/authorize`),
-
-  notionPages: () =>
-    http.get<{ pages: NotionPage[] }>('/api/integrations/notion/pages', { timeoutMs: 30000 }),
-
-  setNotionParentPage: (pageId: string) =>
-    http.put<{ ok: boolean; page_id: string; title: string }>(
-      '/api/integrations/notion/default-parent-page',
-      { params: { page_id: pageId }, timeoutMs: 30000 },
-    ),
-
   /** 未配置时后端返回 404，这里统一转成 null。 */
   async emailConfig(): Promise<EmailConfig | null> {
     try {
@@ -115,6 +104,15 @@ export const integrationApi = {
     http.put<{ ok: boolean }>('/api/integrations/email', { json: { address, auth_code: authCode } }),
 
   deleteEmail: () => http.delete<{ ok: boolean }>('/api/integrations/email'),
+}
+
+export const scheduleApi = {
+  /** 默认从现在起的有效日程；status 取 active / cancelled / all。 */
+  list: (status = 'active', limit = 20, timeMin = '') =>
+    http.get<ScheduleListResponse>('/api/schedules', {
+      params: { status, limit, time_min: timeMin },
+    }),
+  cancel: (id: number) => http.post<CancelScheduleResponse>(`/api/schedules/${id}/cancel`),
 }
 
 export const reminderApi = {

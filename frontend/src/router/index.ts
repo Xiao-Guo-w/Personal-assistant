@@ -5,6 +5,7 @@ import { authState, refreshMe, resetAuth } from '@/stores/auth'
 import { resetChat } from '@/stores/chat'
 import { resetKb } from '@/stores/kb'
 import { resetReminders } from '@/stores/reminders'
+import { resetSchedules } from '@/stores/schedules'
 
 const routes: RouteRecordRaw[] = [
   {
@@ -60,6 +61,7 @@ onUnauthorized(() => {
   resetChat()
   resetKb()
   resetReminders()
+  resetSchedules()
   if (router.currentRoute.value.name !== 'login') {
     void router.replace({ name: 'login' })
   }

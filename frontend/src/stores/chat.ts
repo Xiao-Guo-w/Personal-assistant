@@ -2,6 +2,8 @@ import { computed, reactive } from 'vue'
 
 import { errorMessage, isNotFound, sessionApi } from '@/api'
 import type { ChatMessage, ChatStatus, SessionMeta } from '@/api/types'
+import { refreshReminders } from '@/stores/reminders'
+import { refreshSchedules } from '@/stores/schedules'
 
 interface ChatState {
   sessions: SessionMeta[]
@@ -156,6 +158,9 @@ export async function sendMessage(text: string): Promise<boolean> {
     chatState.messages.push({ role: 'assistant', content: reply })
     // 首条消息会改写会话标题，同步一下列表
     await loadSessions()
+    // 这一轮可能建了日程 / 提醒，让侧边栏立刻反映出来（不必等下一次轮询）
+    void refreshReminders()
+    void refreshSchedules()
     return true
   } catch (error) {
     chatState.messages.push({ role: 'assistant', content: errorMessage(error), failed: true })

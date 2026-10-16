@@ -59,7 +59,7 @@ _QUESTION_HINTS = ("吗", "?", "？", "是否", "有没有")
 # 用户消息里出现这些词，说明这一轮是在要求执行动作
 _ACTION_HINTS = (
     "发邮件", "发送", "邮件", "创建", "新建", "建个", "记一条", "记一下",
-    "归档", "删除", "提醒", "日程", "页面",
+    "删除", "提醒", "日程", "安排", "会议", "约", "改到", "推迟", "取消",
 )
 
 FABRICATION_NOTICE = (
@@ -183,15 +183,57 @@ def _drop_claim(ai_msg: AIMessage) -> AIMessage:
     return ai_msg.model_copy(update={"content": ""})
 
 
+def _advance_text(value) -> str:
+    """提前提醒分钟数 → 人话。"""
+    if value is None:
+        return "默认（提前 15 分钟）"
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return "默认（提前 15 分钟）"
+    if minutes < 0:
+        return "不需要邮件提醒"
+    if minutes == 0:
+        return "到点提醒"
+    return f"提前 {minutes} 分钟"
+
+
 def _format_confirmation(tool_name: str, args: dict) -> str:
     """把待执行操作翻译成人话。"""
-    if tool_name == "create_calendar_event":
+    if tool_name == "create_schedule":
         return (
             "即将创建日程：\n"
             f"- 标题：{args.get('title')}\n"
             f"- 开始：{args.get('start')}\n"
-            f"- 结束：{args.get('end')}\n"
-            f"- 参与人：{', '.join(args.get('attendees') or []) or '无'}\n"
+            f"- 结束：{args.get('end') or '（按默认会议时长自动补算）'}\n"
+            f"- 地点：{args.get('location') or '无'}\n"
+            f"- 备注：{args.get('description') or '无'}\n"
+            f"- 邮件提醒：{_advance_text(args.get('remind_minutes'))}\n"
+            "回复“确认”或“取消”。"
+        )
+    if tool_name == "update_schedule":
+        changes = [
+            f"- 新标题：{args.get('title')}" if args.get("title") else "",
+            f"- 新开始：{args.get('start')}" if args.get("start") else "",
+            f"- 新结束：{args.get('end')}" if args.get("end") else "",
+            f"- 新地点：{args.get('location')}" if args.get("location") else "",
+            f"- 新备注：{args.get('description')}" if args.get("description") else "",
+            f"- 邮件提醒：{_advance_text(args.get('remind_minutes'))}"
+            if args.get("remind_minutes") is not None else "",
+        ]
+        detail = "\n".join(item for item in changes if item) or "- （未指定要改什么）"
+        return (
+            "即将修改日程：\n"
+            f"- 目标日程：{args.get('schedule_id') or args.get('locate_title') or '（未指定）'}\n"
+            f"{detail}\n"
+            "改期后关联的邮件提醒会一起顺延。\n"
+            "回复“确认”或“取消”。"
+        )
+    if tool_name == "cancel_schedule":
+        return (
+            "即将取消日程：\n"
+            f"- 目标日程：{args.get('schedule_id') or args.get('locate_title') or '（未指定）'}\n"
+            "它还没发出的邮件提醒会一并取消。\n"
             "回复“确认”或“取消”。"
         )
     if tool_name == "send_email":
@@ -216,7 +258,7 @@ def _format_confirmation(tool_name: str, args: dict) -> str:
             "即将创建提醒：\n"
             f"- 内容：{args.get('text')}\n"
             f"- 时间：{args.get('remind_at')}\n"
-            "到点后会发邮件并在应用内通知。\n"
+            "到点后会给你绑定的 QQ 邮箱发提醒邮件，并在应用内通知。\n"
             "回复“确认”或“取消”。"
         )
     if tool_name == "cancel_reminder":
@@ -225,31 +267,6 @@ def _format_confirmation(tool_name: str, args: dict) -> str:
             f"- 提醒 ID：{args.get('reminder_id') or '（按内容匹配）'}\n"
             f"- 内容：{args.get('text') or '（未指定）'}\n"
             "回复“确认”或“取消”。"
-        )
-    if tool_name == "create_notion_page":
-        # 页面模式：正文可能很长，确认文案里只给预览
-        content = (args.get("content") or "").strip()
-        preview = f"{content[:50]}…" if len(content) > 50 else (content or "（无正文）")
-        return (
-            "即将在 Notion 中创建子页面：\n"
-            f"- 标题：{args.get('title')}\n"
-            f"- 父页面：{args.get('parent_page_id') or '（默认父页面）'}\n"
-            f"- 正文：{preview}\n"
-            "回复“确认”或“取消”。"
-        )
-    if tool_name == "update_notion_page":
-        return (
-            "即将更新 Notion 页面：\n"
-            f"- 页面 ID：{args.get('page_id')}\n"
-            f"- 新标题：{args.get('title') or '（不改）'}\n"
-            f"- 追加正文：{(args.get('append_content') or '（无）')[:50]}\n"
-            "回复“确认”或“取消”。"
-        )
-    if tool_name == "archive_notion_page":
-        return (
-            "即将归档 Notion 页面：\n"
-            f"- 页面 ID：{args.get('page_id')}\n"
-            "归档后页面进入回收站，回复“确认”或“取消”。"
         )
     return f"即将执行 {tool_name}，参数：{args}。回复“确认”或“取消”。"
 
@@ -280,10 +297,33 @@ def _format_result(tool_name: str, result: dict) -> str:
     if isinstance(result, dict) and result.get("deduplicated"):
         return "⚠️ 这是一次重复请求，已跳过重复执行（此前同样的操作已经完成过）。"
 
-    if tool_name == "create_calendar_event":
-        return f"✅ 日程已创建：{result.get('title')}（{result.get('start')}）"
-    if tool_name == "list_calendar_events":
-        return f"✅ 查询到 {len(result.get('events', []))} 个日程"
+    if tool_name == "create_schedule":
+        when = result.get("start_at_local") or result.get("start_at")
+        line = f"✅ 日程已创建：{result.get('title')}（{when}）"
+        if result.get("remind_at_local"):
+            line += f"\n邮件提醒已安排在 {result.get('remind_at_local')}"
+        if result.get("note"):
+            line += f"\n⚠️ {result.get('note')}"
+        return line
+    if tool_name == "list_schedules":
+        return f"✅ 查询到 {result.get('count', 0)} 条日程"
+    if tool_name == "update_schedule":
+        if not result.get("updated"):
+            return f"⚠️ {result.get('message') or '没有找到匹配的日程'}"
+        line = (
+            f"✅ 日程已更新：{result.get('title')}"
+            f"（{result.get('start_at_local')}）"
+        )
+        if result.get("reminder_note"):
+            line += f"\n{result.get('reminder_note')}"
+        return line
+    if tool_name == "cancel_schedule":
+        if not result.get("cancelled"):
+            return f"⚠️ {result.get('message') or '没有找到匹配的日程'}"
+        line = f"✅ 已取消日程：{result.get('title')}（{result.get('start_at_local')}）"
+        if result.get("cancelled_reminders"):
+            line += f"\n同时取消了 {result.get('cancelled_reminders')} 条未发出的邮件提醒"
+        return line
     if tool_name == "send_email":
         return f"✅ 邮件已发送至 {result.get('to')}"
     if tool_name == "schedule_email":
@@ -300,14 +340,6 @@ def _format_result(tool_name: str, result: dict) -> str:
         if not result.get("cancelled"):
             return f"⚠️ {result.get('message') or '没有找到匹配的提醒'}"
         return f"✅ 已取消提醒：{result.get('text')}（{result.get('remind_at_local')}）"
-    if tool_name == "create_notion_page":
-        return f"✅ Notion 页面已创建：{result.get('title')}（{result.get('url')}）"
-    if tool_name == "list_notion_pages":
-        return f"✅ 找到 {result.get('count', 0)} 个子页面"
-    if tool_name == "update_notion_page":
-        return f"✅ Notion 页面已更新：{result.get('page_id')}"
-    if tool_name == "archive_notion_page":
-        return f"✅ Notion 页面已归档：{result.get('page_id')}"
     if tool_name == "remember_preference":
         return f"✅ 已记住偏好：{result.get('key')} = {result.get('value')}"
     return f"✅ 操作完成：{result}"
@@ -426,7 +458,7 @@ async def prepare_confirmation_node(state: AgentState) -> dict:
     """
     危险操作：挂起等待确认（本轮所有工具调用都在这里分流）。
 
-    LLM 一轮里可能同时给出多个工具调用（例如一次要求建 3 个 Notion 页面）。
+    LLM 一轮里可能同时给出多个工具调用（例如一次要求建 3 个日程）。
     旧实现只看 tool_calls[0]：后面的调用既没执行也没回消息，会被静默丢弃；
     而且留在状态里的 tool_call 没有对应的 ToolMessage，下一轮模型请求
     会因"工具调用没有回执"被判为非法（400）。现在的做法是：

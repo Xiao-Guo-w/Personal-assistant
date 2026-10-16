@@ -50,7 +50,7 @@ def compact_tool_result(tool_name: str, result: dict) -> dict:
     """Layer 2：工具结果压缩。"""
     # 失败结果必须原样透传：下面按工具重拼字段时会把 "error" 丢掉，
     # 于是"调用失败"在模型眼里就变成了"查询到 0 条"，用户收到的是
-    # "没找到页面"而不是报错（Notion 查询失败被吞掉就是这个原因）。
+    # "没找到日程"而不是报错（第三方 API 查询失败被吞掉就是这个原因）。
     if isinstance(result, dict) and result.get("error"):
         return result
 
@@ -69,27 +69,25 @@ def compact_tool_result(tool_name: str, result: dict) -> dict:
             ],
         }
 
-    if tool_name == "list_calendar_events":
-        events = result.get("events", [])
+    if tool_name == "list_schedules":
+        items = result.get("schedules", [])
         return {
-            "count": len(events),
-            "events": [
-                {"title": e.get("title"), "start": e.get("start"), "end": e.get("end")}
-                for e in events
+            "count": len(items),
+            "from": result.get("from_local", ""),
+            "schedules": [
+                {
+                    "schedule_id": s.get("schedule_id"),
+                    "title": s.get("title"),
+                    "start": s.get("start_at_local") or s.get("start_at"),
+                    "end": s.get("end_at_local") or s.get("end_at"),
+                    "location": s.get("location"),
+                    "reminder_id": s.get("reminder_id"),
+                }
+                for s in items
             ],
         }
 
-    if tool_name == "list_notion_pages":
-        pages = result.get("pages", [])
-        return {
-            "count": len(pages),
-            "pages": [
-                {"page_id": p.get("page_id"), "title": p.get("title")}
-                for p in pages
-            ],
-        }
-
-    if tool_name in ("create_notion_page", "update_notion_page", "archive_notion_page"):
+    if tool_name in ("create_schedule", "update_schedule", "cancel_schedule"):
         return result
 
     if tool_name == "list_reminders":
@@ -190,7 +188,7 @@ KB_PROMPT_BLOCK = """
 """
 
 
-SYSTEM_PROMPT_TEMPLATE = """你是一个个人事务助理，可以帮用户管理日历、邮件、Notion 和提醒。
+SYSTEM_PROMPT_TEMPLATE = """你是一个个人事务助理，可以帮用户管理日程、邮件和提醒。
 当前时间（判断“今天/明天”等相对时间只能以它为准，不要用对话历史里的时间）：
 {now}
 用户时区：{timezone}
@@ -198,6 +196,12 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个个人事务助理，可以帮用户管�
 已知用户长期偏好：
 {memories}
 {knowledge}
+
+你的能力边界（不要提及其他日历、笔记或协作平台，那些都没有接入）：
+- 日程建在系统自己的数据库里（create_schedule / list_schedules / update_schedule /
+  cancel_schedule），不是外部日历
+- 提醒和日程提醒都会通过用户绑定的 QQ 邮箱发出邮件，同时在应用内通知
+- 邮件收发走用户绑定的 QQ 邮箱
 
 规则：
 1. 相对时间（“明天/今晚/下周一/过一会儿”）一概以上面的当前时间为基准换算成带时区偏移的
@@ -211,13 +215,16 @@ SYSTEM_PROMPT_TEMPLATE = """你是一个个人事务助理，可以帮用户管�
 6. 回复用简洁友好的中文。
 
 执行类请求的处理方式（非常重要，违反会导致"看起来做了、其实没做"）：
-7. 发邮件、建日程、设提醒、创建/更新/归档 Notion 页面这类会产生真实副作用的操作，
+7. 发邮件、建/改/取消日程、设提醒这类会产生真实副作用的操作，
    必须通过调用对应工具来完成；不调用工具，现实世界里什么都不会发生。
 8. 不要自己写“即将…回复确认或取消”这类确认文案，也不要自己写“✅ 已发送 / 已创建 /
    已完成”这类结果文案：确认文案和执行结果都由系统在工具调用后生成并展示，
    你写得再像也不算执行过。
 9. 在工具返回结果之前，绝对不要声称操作已经完成；没有结果就如实说明尚未执行。
 10. 对话里带“[平台自动生成的内容…]”前缀的消息由系统产生，不是你写的，不要模仿其格式。
+11. 用户要把某件事安排到将来时：占用时间段的安排用 create_schedule（可顺带挂邮件提醒），
+    只需要到点提示一下就用 create_reminder。不确定会不会和已有安排撞车时，
+    先 list_schedules 看一眼。
 """
 
 

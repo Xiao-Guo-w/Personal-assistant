@@ -121,18 +121,6 @@ class Settings(BaseSettings):
     # 这个间隔只用于"漏掉的 pending 文档"的兜底捡起与开机自愈
     kb_worker_interval_seconds: int = 15
 
-    # ---------- OAuth 通用 ----------
-    oauth_redirect_base: str = "http://localhost:8000"
-    oauth_state_secret: str = "change-me-please"
-
-    # ---------- 飞书应用凭证（OAuth client） ----------
-    feishu_app_id: str = ""
-    feishu_app_secret: str = ""
-
-    # ---------- Notion 应用凭证（OAuth client） ----------
-    notion_client_id: str = ""
-    notion_client_secret: str = ""
-
     # .env 加载配置；extra="ignore" 允许 .env 有额外字段不报错
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

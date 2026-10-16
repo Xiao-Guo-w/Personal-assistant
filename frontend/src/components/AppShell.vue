@@ -3,11 +3,13 @@ import { onMounted } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
 import ReminderPanel from '@/components/ReminderPanel.vue'
+import SchedulePanel from '@/components/SchedulePanel.vue'
 import SessionList from '@/components/SessionList.vue'
 import { pushToast } from '@/composables/useToast'
 import { authState, displayName, logout, restartOnboarding } from '@/stores/auth'
 import { chatState, createSession, loadSessions, openSession, resetChat } from '@/stores/chat'
 import { resetReminders, unreadCount } from '@/stores/reminders'
+import { resetSchedules } from '@/stores/schedules'
 
 const router = useRouter()
 const route = useRoute()
@@ -40,6 +42,7 @@ async function handleLogout(): Promise<void> {
   await logout()
   resetChat()
   resetReminders()
+  resetSchedules()
   await router.replace({ name: 'login' })
 }
 
@@ -69,6 +72,10 @@ async function handleRestartOnboarding(): Promise<void> {
       </button>
 
       <SessionList />
+
+      <hr class="divider" />
+
+      <SchedulePanel />
 
       <hr class="divider" />
 

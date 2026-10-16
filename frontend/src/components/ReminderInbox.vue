@@ -21,6 +21,9 @@ function toneOf(item: { status: string; kind: string }): string {
         <strong v-else-if="item.kind === 'email'">
           ✅ 定时邮件已发送（{{ item.remind_at_local }}）
         </strong>
+        <strong v-else-if="item.schedule_id">
+          📅 日程提醒（{{ item.remind_at_local }}）
+        </strong>
         <strong v-else>⏰ 提醒（{{ item.remind_at_local }}）</strong>
         <p v-if="item.kind !== 'email'" class="alert-text">{{ item.text }}</p>
         <p v-if="item.status === 'failed'" class="alert-text">

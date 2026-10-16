@@ -73,6 +73,7 @@ def _apply_light_migrations(conn) -> None:
         "reminders": {
             "kind": "VARCHAR(16) DEFAULT 'reminder'",
             "payload_json": "TEXT DEFAULT ''",
+            "schedule_id": "INTEGER",
         },
     }
 

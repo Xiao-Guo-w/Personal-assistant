@@ -59,7 +59,7 @@ function switchTab(next: 'login' | 'register'): void {
       <header class="auth-header">
         <div class="auth-logo">🤖</div>
         <h1>个人事务助理</h1>
-        <p class="muted">日程、邮件、Notion、提醒，一句话交给 Agent。</p>
+        <p class="muted">日程、邮件、提醒，一句话交给 Agent。</p>
       </header>
 
       <div class="tabs">

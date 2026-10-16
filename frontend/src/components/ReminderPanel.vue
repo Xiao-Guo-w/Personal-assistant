@@ -29,7 +29,9 @@ async function handleCancel(id: number): Promise<void> {
       <p v-if="!items.length" class="muted small">暂无待触发的提醒。</p>
       <div v-for="item in items" :key="item.id" class="reminder-row">
         <div class="reminder-text">
-          <span class="reminder-icon">{{ item.kind === 'email' ? '📧' : '⏰' }}</span>
+          <span class="reminder-icon">
+            {{ item.kind === 'email' ? '📧' : item.schedule_id ? '📅' : '⏰' }}
+          </span>
           <div>
             <div class="reminder-title">{{ item.text }}</div>
             <div class="muted small">{{ item.remind_at_local }}</div>

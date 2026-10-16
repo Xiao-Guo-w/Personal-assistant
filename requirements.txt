@@ -48,7 +48,6 @@ markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
 narwhals==2.26.0
-notion-client==3.1.0
 numpy==2.4.6
 openai==3.20.0
 orjson==3.12.0

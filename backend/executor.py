@@ -3,9 +3,10 @@
 
 特判分支：
 - remember_preference：走异步 ORM
-- Notion 系列：走用户级 OAuth 客户端
 - 邮箱系列：走用户级 QQ 邮箱客户端
-- 日历系列：走用户级飞书日历客户端
+- 日程系列：落系统自己的库（backend/schedules.py），并顺带排提醒
+- 提醒 / 定时邮件：落库排队，由后台调度器到点通过 QQ 邮箱投递
+- 知识库检索：走向量 + 关键词混合检索
 
 其余工具走 @tool handler（丢线程池）。
 """
@@ -33,8 +34,8 @@ class NonRetryableError(Exception):
 
 
 # 属于"代码或参数写错"的异常：重试不可能成功，直接判定为不可重试。
-# 典型场景：SDK 升级后方法被移除（AttributeError，Notion databases.query 就是这样）、
-# 工具参数缺字段（KeyError）、参数校验不通过（ValueError）。
+# 典型场景：SDK 升级后方法被移除（AttributeError）、工具参数缺字段（KeyError）、
+# 参数校验不通过（ValueError）。
 # 之前这类错误会被当成可重试错误白跑 3 次，并写下一串 retry 审计，掩盖真正原因。
 _PROGRAMMING_ERRORS = (
     AttributeError, TypeError, KeyError, IndexError, NotImplementedError, ValueError,
@@ -127,31 +128,23 @@ async def execute_with_retry(
             await _audit(user_id, session_id, tool_name, args, {"error": str(e)}, "failed")
             raise
 
-    # ---------- 特判 2：Notion 系列 ----------
-    if tool_name in (
-        "create_notion_page", "list_notion_pages",
-        "update_notion_page", "archive_notion_page",
-    ):
-        return await _execute_notion_tool(
-            session_id, tool_name, args, user_id,
-            idempotency_key, max_retries, meta,
-        )
-
-    # ---------- 特判 3：邮箱系列 ----------
+    # ---------- 特判 2：邮箱系列 ----------
     if tool_name in ("search_email", "send_email"):
         return await _execute_email_tool(
             session_id, tool_name, args, user_id,
             idempotency_key, max_retries, meta,
         )
 
-    # ---------- 特判 4：日历系列 ----------
-    if tool_name in ("list_calendar_events", "create_calendar_event"):
-        return await _execute_calendar_tool(
+    # ---------- 特判 3：日程系列 ----------
+    if tool_name in (
+        "create_schedule", "list_schedules", "update_schedule", "cancel_schedule",
+    ):
+        return await _execute_schedule_tool(
             session_id, tool_name, args, user_id,
             idempotency_key, max_retries, meta,
         )
 
-    # ---------- 特判 5：提醒 / 定时任务系列（定时邮件也落在这张表） ----------
+    # ---------- 特判 4：提醒 / 定时任务系列（定时邮件也落在这张表） ----------
     if tool_name in (
         "create_reminder", "list_reminders", "cancel_reminder", "schedule_email",
     ):
@@ -160,7 +153,7 @@ async def execute_with_retry(
             idempotency_key, max_retries, meta,
         )
 
-    # ---------- 特判 6：知识库检索 ----------
+    # ---------- 特判 5：知识库检索 ----------
     if tool_name == "search_knowledge_base":
         return await _execute_kb_tool(
             session_id, tool_name, args, user_id, dialogue,
@@ -276,21 +269,26 @@ async def _execute_kb_tool(
     }
 
 
-async def _execute_notion_tool(
+async def _execute_schedule_tool(
     session_id: str, tool_name: str, args: dict, user_id: int,
     idempotency_key: str | None, max_retries: int, meta: dict,
 ) -> dict:
-    """Notion 工具执行：走用户级 OAuth 客户端（页面模式）。"""
-    from .notion_client_wrapper import (
-        NotionAuthError, NotionNotConfiguredError,
-        archive_page, create_page_under_parent, list_child_pages, update_page,
+    """
+    日程工具执行：落系统自己的库（backend/schedules.py）。
+
+    日程是真实副作用（写库 + 排出一条到点发邮件的提醒），
+    所以和邮箱一样走幂等 + 审计。
+    """
+    from .schedules import (
+        ScheduleError, cancel_schedule, create_schedule, list_schedules,
+        update_schedule,
     )
 
     if idempotency_key:
         cached = await _cache_get(idempotency_key)
         if cached is not None:
-            # 幂等命中：这次并没有真正调用 Notion，必须留痕并标记，
-            # 否则前端会显示"已创建"，用户以为写进去了（实际是重复请求被跳过）
+            # 幂等命中：这次没有真的落库，必须留痕并标记，
+            # 否则前端会显示"已创建"，用户以为又建了一条
             flagged = {**cached, "deduplicated": True}
             await _audit(user_id, session_id, tool_name, args, flagged, "cached")
             return flagged
@@ -298,37 +296,54 @@ async def _execute_notion_tool(
     last_err: Exception | None = None
     for i in range(max_retries):
         try:
-            if tool_name == "create_notion_page":
-                result = await create_page_under_parent(
+            if tool_name == "create_schedule":
+                result = await create_schedule(
                     user_id=user_id,
-                    parent_page_id=args.get("parent_page_id", ""),
-                    title=args["title"],
-                    content=args.get("content", ""),
-                )
-            elif tool_name == "list_notion_pages":
-                result = await list_child_pages(
-                    user_id=user_id,
-                    parent_page_id=args.get("parent_page_id", ""),
-                    page_size=args.get("page_size", 10),
-                )
-            elif tool_name == "update_notion_page":
-                result = await update_page(
-                    user_id=user_id,
-                    page_id=args["page_id"],
+                    # 一律用 get + 默认值：缺参数时由 schedules 抛出可读的 ScheduleError，
+                    # 而不是 KeyError 变成"工具内部错误"
                     title=args.get("title", ""),
-                    append_content=args.get("append_content", ""),
+                    start=args.get("start", ""),
+                    end=args.get("end", ""),
+                    location=args.get("location", ""),
+                    description=args.get("description", ""),
+                    remind_minutes=args.get("remind_minutes"),
                 )
-            elif tool_name == "archive_notion_page":
-                result = await archive_page(user_id=user_id, page_id=args["page_id"])
+            elif tool_name == "list_schedules":
+                result = await list_schedules(
+                    user_id=user_id,
+                    time_min=args.get("time_min", ""),
+                    time_max=args.get("time_max", ""),
+                    status=args.get("status", "active"),
+                    limit=args.get("limit", 20),
+                )
+            elif tool_name == "update_schedule":
+                result = await update_schedule(
+                    user_id=user_id,
+                    schedule_id=args.get("schedule_id", ""),
+                    locate_title=args.get("locate_title", ""),
+                    title=args.get("title", ""),
+                    start=args.get("start", ""),
+                    end=args.get("end", ""),
+                    location=args.get("location", ""),
+                    description=args.get("description", ""),
+                    remind_minutes=args.get("remind_minutes"),
+                )
+            elif tool_name == "cancel_schedule":
+                result = await cancel_schedule(
+                    user_id=user_id,
+                    schedule_id=args.get("schedule_id", ""),
+                    locate_title=args.get("locate_title", ""),
+                )
             else:
-                raise NonRetryableError(f"未知 Notion 工具：{tool_name}")
+                raise NonRetryableError(f"未知日程工具：{tool_name}")
 
             if idempotency_key:
                 await _cache_set(idempotency_key, result)
             await _audit(user_id, session_id, tool_name, args, result, "success")
             return result
 
-        except (NotionNotConfiguredError, NotionAuthError) as e:
+        except ScheduleError as e:
+            # 时间格式错 / 时间已过去 / 标题为空：参数问题，重试没用
             await _audit(user_id, session_id, tool_name, args,
                          {"error": str(e)}, "failed")
             raise NonRetryableError(str(e))
@@ -337,9 +352,7 @@ async def _execute_notion_tool(
             await _audit(user_id, session_id, tool_name, args,
                          {"error": str(e)}, "failed")
             raise NonRetryableError(f"工具内部错误：{e}") from e
-        except NonRetryableError as e:
-            await _audit(user_id, session_id, tool_name, args,
-                         {"error": str(e)}, "failed")
+        except NonRetryableError:
             raise
         except Exception as e:  # noqa: BLE001
             last_err = e
@@ -412,66 +425,6 @@ async def _execute_email_tool(
     raise last_err or RuntimeError("unknown error")
 
 
-async def _execute_calendar_tool(
-    session_id: str, tool_name: str, args: dict, user_id: int,
-    idempotency_key: str | None, max_retries: int, meta: dict,
-) -> dict:
-    """日历工具执行：走用户级飞书日历客户端。"""
-    from .feishu_calendar_wrapper import (
-        FeishuApiError, FeishuAuthError, FeishuNotConfiguredError,
-        create_event, list_events,
-    )
-
-    if idempotency_key:
-        cached = await _cache_get(idempotency_key)
-        if cached is not None:
-            # 幂等命中：这次没有真的调用飞书，留痕 + 标记，避免"看起来已创建"
-            flagged = {**cached, "deduplicated": True}
-            await _audit(user_id, session_id, tool_name, args, flagged, "cached")
-            return flagged
-
-    last_err: Exception | None = None
-    for i in range(max_retries):
-        try:
-            if tool_name == "list_calendar_events":
-                result = await list_events(
-                    user_id=user_id,
-                    time_min=args["time_min"],
-                    time_max=args["time_max"],
-                )
-            elif tool_name == "create_calendar_event":
-                result = await create_event(
-                    user_id=user_id,
-                    title=args["title"],
-                    start=args["start"],
-                    end=args["end"],
-                    attendees=args.get("attendees"),
-                    description=args.get("description", ""),
-                )
-            else:
-                raise NonRetryableError(f"未知日历工具：{tool_name}")
-
-            if idempotency_key:
-                await _cache_set(idempotency_key, result)
-            await _audit(user_id, session_id, tool_name, args, result, "success")
-            return result
-
-        except (FeishuNotConfiguredError, FeishuAuthError, FeishuApiError) as e:
-            await _audit(user_id, session_id, tool_name, args,
-                         {"error": str(e)}, "failed")
-            raise NonRetryableError(str(e))
-        except Exception as e:  # noqa: BLE001
-            last_err = e
-            will_retry = meta["retryable"] and i < max_retries - 1
-            await _audit(user_id, session_id, tool_name, args,
-                         {"error": str(e)}, "retry" if will_retry else "failed")
-            if not will_retry:
-                raise
-            await asyncio.sleep(2 ** i + random.random())
-
-    raise last_err or RuntimeError("unknown error")
-
-
 async def _execute_reminder_tool(
     session_id: str, tool_name: str, args: dict, user_id: int,
     idempotency_key: str | None, max_retries: int, meta: dict,
@@ -479,7 +432,7 @@ async def _execute_reminder_tool(
     """
     提醒工具执行：落库 + 交给后台调度器投递。
 
-    提醒是真实副作用（会发邮件），所以和 Notion/邮箱一样走用户级数据 + 审计。
+    提醒是真实副作用（会往用户绑定的 QQ 邮箱发信），所以和邮箱一样走幂等 + 审计。
     """
     from .reminders import (
         ReminderError, cancel_reminder, create_reminder, create_scheduled_email,

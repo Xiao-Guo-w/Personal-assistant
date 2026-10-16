@@ -41,18 +41,16 @@ _SUMMARIZE_STEP = "正在整理结果…"
 
 _TOOL_STEPS = {
     "search_knowledge_base": "正在检索知识库…",
-    "list_calendar_events": "正在查询日程…",
-    "create_calendar_event": "正在创建日程…",
+    "create_schedule": "正在创建日程…",
+    "list_schedules": "正在查询日程…",
+    "update_schedule": "正在修改日程…",
+    "cancel_schedule": "正在取消日程…",
     "search_email": "正在检索邮件…",
     "send_email": "正在发送邮件…",
     "schedule_email": "正在安排定时邮件…",
     "create_reminder": "正在创建提醒…",
     "list_reminders": "正在查询提醒…",
     "cancel_reminder": "正在取消提醒…",
-    "create_notion_page": "正在创建 Notion 页面…",
-    "list_notion_pages": "正在查询 Notion 页面…",
-    "update_notion_page": "正在更新 Notion 页面…",
-    "archive_notion_page": "正在归档 Notion 页面…",
     "remember_preference": "正在记录偏好…",
 }
 

@@ -1,14 +1,16 @@
 """
-FastAPI 入口（多用户隔离 + 加密存储 + 引导 + OAuth 集成）。
+FastAPI 入口（多用户隔离 + 加密存储 + 引导 + QQ 邮箱绑定）。
 
 接口分类：
 - 认证：/api/auth/*、/api/me、/api/onboarding/*
 - 会话：/api/sessions/*
 - 聊天：/api/chat
 - 记忆：/api/memory/*
-- OAuth：/api/oauth/feishu/*、/api/oauth/notion/*
-- 集成状态：/api/integrations/*
-- QQ 邮箱配置（手动）：/api/integrations/email
+- 日程：/api/schedules/*（系统内自建，不走第三方日历 API）
+- 提醒：/api/reminders/*
+- 集成状态：/api/integrations/status
+- QQ 邮箱配置（手动填授权码）：/api/integrations/email
+- 知识库：/api/kb/*
 """
 from dotenv import load_dotenv
 
@@ -22,7 +24,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 
@@ -34,7 +36,6 @@ from .crypto import EncryptionError, _get_fernet
 from .db import close_db, init_db
 from .graph import close_graph, get_graph, init_graph
 from .memory import delete_user_memory, list_user_memories_detailed
-from .oauth_helpers import generate_state, verify_state
 from .sessions import (
     assert_owned, create_session, delete_session, list_sessions, update_title,
 )
@@ -117,8 +118,6 @@ async def lifespan(app: FastAPI):
     from .kb.deps import vectorstore
     await vectorstore.close()
 
-    from .notion_client_wrapper import close_all_clients
-    await close_all_clients()
     await close_graph()
     await close_db()
 
@@ -453,103 +452,9 @@ async def delete_memory(key: str, user: dict = Depends(current_user)):
 
 
 # ============================================================
-# 飞书 OAuth
-# ============================================================
-
-@app.get("/api/oauth/feishu/authorize")
-async def feishu_authorize(user: dict = Depends(current_user)):
-    """返回飞书授权 URL。"""
-    from .feishu_calendar_wrapper import build_authorize_url
-
-    state = generate_state(user["id"])
-    url = build_authorize_url(state)
-    return {"authorize_url": url, "state": state}
-
-
-@app.get("/api/oauth/feishu/callback")
-async def feishu_callback(code: str = "", state: str = "", error: str = ""):
-    """飞书 OAuth 回调，换取 user_access_token 并加密存储。"""
-    from .feishu_calendar_wrapper import (
-        FeishuAuthError, exchange_code_for_token, save_oauth_result,
-    )
-
-    if error:
-        return HTMLResponse(_oauth_result_html(
-            success=False, provider="飞书日历",
-            message=f"授权被拒绝：{error}",
-        ))
-
-    try:
-        user_id = verify_state(state)
-    except ValueError as e:
-        return HTMLResponse(_oauth_result_html(
-            success=False, provider="飞书日历",
-            message=f"state 校验失败：{e}",
-        ))
-
-    try:
-        token_data = await exchange_code_for_token(code)
-        await save_oauth_result(user_id, token_data)
-        return HTMLResponse(_oauth_result_html(
-            success=True, provider="飞书日历",
-            message=f"已连接到飞书账号：{token_data.get('name', '')}",
-        ))
-    except FeishuAuthError as e:
-        return HTMLResponse(_oauth_result_html(
-            success=False, provider="飞书日历", message=str(e),
-        ))
-
-
-# ============================================================
-# Notion OAuth
-# ============================================================
-
-@app.get("/api/oauth/notion/authorize")
-async def notion_authorize(user: dict = Depends(current_user)):
-    """返回 Notion 授权 URL。"""
-    from .notion_client_wrapper import build_authorize_url
-
-    state = generate_state(user["id"])
-    url = build_authorize_url(state)
-    return {"authorize_url": url, "state": state}
-
-
-@app.get("/api/oauth/notion/callback")
-async def notion_callback(code: str = "", state: str = "", error: str = ""):
-    """Notion OAuth 回调，换取 access_token 并加密存储。"""
-    from .notion_client_wrapper import (
-        NotionAuthError, exchange_code_for_token, save_oauth_result,
-    )
-
-    if error:
-        return HTMLResponse(_oauth_result_html(
-            success=False, provider="Notion",
-            message=f"授权被拒绝：{error}",
-        ))
-
-    try:
-        user_id = verify_state(state)
-    except ValueError as e:
-        return HTMLResponse(_oauth_result_html(
-            success=False, provider="Notion",
-            message=f"state 校验失败：{e}",
-        ))
-
-    try:
-        token_data = await exchange_code_for_token(code)
-        await save_oauth_result(user_id, token_data)
-        return HTMLResponse(_oauth_result_html(
-            success=True, provider="Notion",
-            message=f"已连接到工作区：{token_data.get('workspace_name', '')}",
-        ))
-    except NotionAuthError as e:
-        return HTMLResponse(_oauth_result_html(
-            success=False, provider="Notion", message=str(e),
-        ))
-
-
-# ============================================================
 # 集成状态查询与断开
+#
+# 只保留 QQ 邮箱：日程与提醒都在系统内部，不再需要第三方授权。
 # ============================================================
 
 @app.get("/api/integrations/status")
@@ -558,21 +463,6 @@ async def integrations_status(user: dict = Depends(current_user)):
     from .integrations import get_integration
 
     result = {}
-
-    feishu = await get_integration(user["id"], "feishu_calendar")
-    result["feishu_calendar"] = {
-        "connected": bool(feishu and feishu.get("open_id")),
-        "name": feishu.get("name", "") if feishu else "",
-        "open_id": feishu.get("open_id", "") if feishu else "",
-    }
-
-    notion = await get_integration(user["id"], "notion")
-    result["notion"] = {
-        "connected": bool(notion and notion.get("access_token")),
-        "workspace_name": notion.get("workspace_name", "") if notion else "",
-        "workspace_id": notion.get("workspace_id", "") if notion else "",
-        "default_parent_page_id": notion.get("default_parent_page_id", "") if notion else "",
-    }
 
     email = await get_integration(user["id"], "email")
     result["email"] = {
@@ -588,66 +478,13 @@ async def disconnect_integration(provider: str, user: dict = Depends(current_use
     """断开某个集成。"""
     from .integrations import delete_integration
 
-    if provider == "notion":
-        from .notion_client_wrapper import invalidate_client
-        await invalidate_client(user["id"])
-    elif provider in ("feishu_calendar", "email"):
-        pass
-    else:
+    if provider != "email":
         raise HTTPException(400, f"未知 provider：{provider}")
 
     ok = await delete_integration(user["id"], provider)
     if not ok:
         raise HTTPException(404, f"未连接 {provider}")
     return {"ok": True}
-
-
-# ============================================================
-# Notion 辅助接口
-# ============================================================
-
-@app.put("/api/integrations/notion/default-parent-page")
-async def set_notion_default_parent_page(
-    page_id: str,
-    user: dict = Depends(current_user),
-):
-    """
-    设置 Notion 默认父页面（页面模式下新页面的落点）。
-
-    写入前先真正访问一次 Notion（inspect_parent_page）：
-    挡住拼错 / 被截断的 ID，以及"这个页面没授权给集成"的情况。
-    """
-    from .notion_client_wrapper import (
-        NotionAuthError, NotionNotConfiguredError,
-        inspect_parent_page, set_default_parent_page,
-    )
-
-    try:
-        page = await inspect_parent_page(user["id"], page_id)
-    except (NotionNotConfiguredError, NotionAuthError) as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:  # noqa: BLE001 —— Notion 侧异常统一转成可读错误
-        raise HTTPException(502, f"校验父页面失败：{e}")
-
-    await set_default_parent_page(user["id"], page["page_id"])
-    return {
-        "ok": True,
-        "page_id": page["page_id"],
-        "title": page.get("title", ""),
-    }
-
-
-@app.get("/api/integrations/notion/pages")
-async def list_notion_pages(user: dict = Depends(current_user)):
-    """列出用户授权范围内可见的页面（用于选择默认父页面）。"""
-    from .notion_client_wrapper import NotionAuthError, list_pages
-
-    try:
-        return {"pages": await list_pages(user["id"])}
-    except NotionAuthError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"查询页面列表失败：{e}")
 
 
 # ============================================================
@@ -680,6 +517,41 @@ async def get_email_config(user: dict = Depends(current_user)):
         "auth_code_masked": mask(config.get("auth_code", ""), 6, 4),
         "configured": True,
     }
+
+
+# ============================================================
+# 日程接口
+#
+# 日程存在系统自己的库里；到点的通知由提醒调度器通过用户绑定的
+# QQ 邮箱发出，所以这一层只负责增删查改。
+# ============================================================
+
+@app.get("/api/schedules")
+async def schedules_list(
+    time_min: str = "",
+    time_max: str = "",
+    status: str = "active",
+    limit: int = 20,
+    user: dict = Depends(current_user),
+):
+    """查询日程列表。status 取 active / cancelled / all。"""
+    from .schedules import ScheduleError, list_schedules
+
+    try:
+        return await list_schedules(
+            user["id"], time_min=time_min, time_max=time_max,
+            status=status, limit=limit,
+        )
+    except ScheduleError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/api/schedules/{schedule_id}/cancel")
+async def schedules_cancel(schedule_id: int, user: dict = Depends(current_user)):
+    """取消一条日程（同时取消它还没发出的提醒）。"""
+    from .schedules import cancel_schedule
+
+    return await cancel_schedule(user["id"], schedule_id=str(schedule_id))
 
 
 # ============================================================
@@ -974,48 +846,6 @@ def _role(msg) -> str:
         "ToolMessage": "tool",
         "SystemMessage": "system",
     }.get(name, "unknown")
-
-
-def _oauth_result_html(success: bool, provider: str, message: str) -> str:
-    """生成 OAuth 回调结果页面。"""
-    color = "#10b981" if success else "#ef4444"
-    icon = "✅" if success else "❌"
-    title = "授权成功" if success else "授权失败"
-
-    return f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="utf-8">
-        <title>{title} - {provider}</title>
-        <style>
-            body {{
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                display: flex; align-items: center; justify-content: center;
-                min-height: 100vh; margin: 0; background: #f5f5f5;
-            }}
-            .card {{
-                background: white; padding: 40px 60px; border-radius: 12px;
-                box-shadow: 0 4px 12px rgba(0,0,0,0.1); text-align: center;
-                max-width: 480px;
-            }}
-            .icon {{ font-size: 48px; margin-bottom: 16px; }}
-            h1 {{ color: {color}; margin: 0 0 12px 0; font-size: 24px; }}
-            p {{ color: #666; margin: 8px 0; line-height: 1.6; }}
-            .hint {{ color: #999; font-size: 14px; margin-top: 24px; }}
-        </style>
-    </head>
-    <body>
-        <div class="card">
-            <div class="icon">{icon}</div>
-            <h1>{title}</h1>
-            <p><strong>{provider}</strong></p>
-            <p>{message}</p>
-            <p class="hint">请关闭此窗口，返回应用查看连接状态。</p>
-        </div>
-    </body>
-    </html>
-    """
 
 
 @app.get("/health")

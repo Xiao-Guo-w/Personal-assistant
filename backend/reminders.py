@@ -2,26 +2,30 @@
 提醒：解析 → 落库 → 调度 → 投递。
 
 设计要点：
+- 投递渠道只有两种：邮件（通过用户绑定的 QQ 邮箱发给自己）+ 站内收件箱
+  （记录本身即为通知，不依赖任何外部账号授权）
+- 日程提醒复用这套机制：schedules 服务在落日程时顺手建一条带 schedule_id
+  的提醒，到点由这里通过邮件把日程详情发给用户
 - 时间统一按 UTC（naive）入库（和 models 里 created_at 的口径一致），
   展示/发信时再按用户时区换算；解析时兼容"带时区"和"不带时区按用户时区解释"
 - 投递前用一条原子 UPDATE 抢占（pending → firing），只有抢到的进程负责投递，
   多进程或重启都不会重复发
-- 投递渠道：邮件（主）+ 站内收件箱（记录本身即为通知，不依赖外部服务）
 - 邮件失败不影响站内：错误写进 last_error，前端能看到"邮件投递失败"
 """
 
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
+from datetime import datetime
 
 from sqlalchemy import select, update
 
 from .config import settings
 from .db import session_scope
-from .models import Reminder, User
-from .timeutil import DEFAULT_TZ, iso_example, now_text, safe_zone
+from .models import Reminder, Schedule, User
+from .timeutil import (
+    DEFAULT_TZ, TimeParseError, format_local, parse_future_iso, to_iso_utc, utc_now,
+)
 
 
 logger = logging.getLogger("assistant.reminders")
@@ -38,72 +42,17 @@ class ReminderError(Exception):
 # 时间处理
 # ============================================================
 
-def _now_utc() -> datetime:
-    """当前 UTC（naive），与库里存储口径一致。"""
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def _zone(tz_name: str) -> ZoneInfo:
-    """安全地取时区，名称非法时退回默认时区。"""
-    return safe_zone(tz_name)
-
-
 def parse_remind_at(raw: str, tz_name: str = DEFAULT_TZ) -> datetime:
     """
     把时间字符串解析成 UTC（naive）。
 
-    - 带时区（2026-10-02T10:00:00+08:00 / ...Z）→ 直接换算
-    - 不带时区（2026-10-02T10:00:00）→ 按用户时区解释
-    - 明显过去的时间 → 报错（提醒设在过去没有意义）
-
-    报错里一律带上"现在是几点"：老会话里模型容易把"现在"算到对话当初那天，
-    只回一句"时间已经过去了"，它下一次还是照着错的日期算；把当前时间写进去，
-    它才有可能自己纠正过来。
+    实际解析在 timeutil.parse_future_iso（日程与提醒共用同一套口径），
+    这里只把通用的解析异常翻译成提醒域的业务异常。
     """
-    text = (raw or "").strip()
-    if not text:
-        raise ReminderError(
-            "缺少提醒/发送时间：请给出 ISO8601 格式的具体时间并带时区偏移，"
-            f"例如 {iso_example(tz_name)}。"
-        )
-
     try:
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError as e:
-        raise ReminderError(
-            f"无法识别的时间格式「{raw}」：请用 ISO8601 并带时区偏移，"
-            f"例如 {iso_example(tz_name)}。"
-        ) from e
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=_zone(tz_name))
-
-    utc = dt.astimezone(timezone.utc).replace(tzinfo=None)
-
-    # 给 60 秒宽限：模型偶尔会把"现在"算得差几秒
-    if utc < _now_utc() - timedelta(seconds=60):
-        raise ReminderError(
-            f"提醒时间已经过去了：算出来的是 {to_iso_utc(utc)}，"
-            f"而现在是 {now_text(tz_name)}。"
-            "请以现在为准重新给一个未来的时间。"
-        )
-    return utc
-
-
-def to_iso_utc(dt: datetime | None) -> str:
-    """库里的 naive UTC → 带时区的 ISO8601（给接口/前端用）。"""
-    if dt is None:
-        return ""
-    return dt.replace(tzinfo=timezone.utc).isoformat()
-
-
-def format_local(dt_utc: datetime | None, tz_name: str) -> str:
-    """UTC（naive）→ 用户本地时间的可读文案。"""
-    if dt_utc is None:
-        return ""
-    return dt_utc.replace(tzinfo=timezone.utc).astimezone(_zone(tz_name)).strftime(
-        "%Y-%m-%d %H:%M"
-    )
+        return parse_future_iso(raw, tz_name, what="提醒")
+    except TimeParseError as e:
+        raise ReminderError(str(e)) from e
 
 
 def _parse_reminder_id(value: str) -> int | None:
@@ -116,8 +65,8 @@ def _parse_reminder_id(value: str) -> int | None:
     return int(digits) if digits else None
 
 
-async def _user_timezone(user_id: int) -> str:
-    """读用户时区；查不到就用默认值。"""
+async def user_timezone(user_id: int) -> str:
+    """读用户时区；查不到就用默认值。日程模块也复用这个口径。"""
     async with session_scope() as db:
         tz = (
             await db.execute(select(User.timezone).where(User.id == user_id))
@@ -125,14 +74,14 @@ async def _user_timezone(user_id: int) -> str:
     return tz or DEFAULT_TZ
 
 
-def _row_payload(row: Reminder) -> dict:
+def row_payload(row: Reminder) -> dict:
     """
-    解析 payload_json（只有定时邮件用）。
+    解析 payload_json。
 
+    - kind=email：定时邮件的 to / subject / body
+    - kind=reminder 且关联日程：{"remind_minutes": n}，改期时靠它把提醒一起挪
     解析失败按空处理，不让一条脏数据把列表接口整个搞崩。
     """
-    if (row.kind or "reminder") != "email":
-        return {}
     try:
         data = json.loads(row.payload_json or "{}")
     except json.JSONDecodeError:
@@ -142,11 +91,12 @@ def _row_payload(row: Reminder) -> dict:
 
 def _serialize(row: Reminder, tz_name: str) -> dict:
     """ORM 对象 → 接口/工具用的 dict。"""
-    payload = _row_payload(row)
+    payload = row_payload(row)
     return {
         "id": row.id,
         "reminder_id": f"rem_{row.id}",
         "kind": row.kind or "reminder",
+        "schedule_id": row.schedule_id or 0,
         "text": row.text,
         # 定时邮件才有：收件人和主题，供前端/模型区分展示
         "to": payload.get("to", ""),
@@ -173,7 +123,7 @@ async def create_reminder(user_id: int, text: str, remind_at: str) -> dict:
     if len(content) > 300:
         content = content[:300]
 
-    tz_name = await _user_timezone(user_id)
+    tz_name = await user_timezone(user_id)
     when = parse_remind_at(remind_at, tz_name)
 
     async with session_scope() as db:
@@ -210,7 +160,7 @@ async def create_scheduled_email(
     if "@" not in recipient:
         raise ReminderError(f"收件人地址看起来不对：{recipient}")
 
-    tz_name = await _user_timezone(user_id)
+    tz_name = await user_timezone(user_id)
     when = parse_remind_at(send_at, tz_name)
 
     payload = json.dumps(
@@ -255,7 +205,7 @@ async def list_reminders(user_id: int, status: str = "pending", limit: int = 10)
     except (TypeError, ValueError):
         size = 10
 
-    tz_name = await _user_timezone(user_id)
+    tz_name = await user_timezone(user_id)
 
     async with session_scope() as db:
         stmt = select(Reminder).where(Reminder.user_id == user_id)
@@ -282,7 +232,7 @@ async def cancel_reminder(user_id: int, reminder_id: str = "", text: str = "") -
     if numeric is None and not keyword:
         raise ReminderError("请提供要取消的提醒 ID（rem_12）或提醒内容。")
 
-    tz_name = await _user_timezone(user_id)
+    tz_name = await user_timezone(user_id)
 
     async with session_scope() as db:
         stmt = select(Reminder).where(
@@ -317,7 +267,7 @@ async def list_inbox(user_id: int, limit: int = 20) -> dict:
     前端会定时轮询它，到点后就能在聊天页顶部看到提醒卡片。
     失败的定时邮件也在这里出现 —— 用户必须能看到"没发出去"。
     """
-    tz_name = await _user_timezone(user_id)
+    tz_name = await user_timezone(user_id)
     async with session_scope() as db:
         rows = (
             await db.execute(
@@ -341,7 +291,7 @@ async def acknowledge_reminder(user_id: int, reminder_id: int) -> bool:
         result = await db.execute(
             update(Reminder)
             .where(Reminder.id == reminder_id, Reminder.user_id == user_id)
-            .values(acknowledged_at=_now_utc())
+            .values(acknowledged_at=utc_now())
         )
         return result.rowcount == 1
 
@@ -357,7 +307,7 @@ async def dispatch_due_reminders(limit: int = 50) -> int:
     并发安全：先用一条 UPDATE ... WHERE status='pending' 抢占（pending → firing），
     只有抢占成功的进程负责投递，所以多进程部署或进程重启都不会重复发送。
     """
-    now = _now_utc()
+    now = utc_now()
 
     async with session_scope() as db:
         ids = (
@@ -389,7 +339,8 @@ async def _deliver(reminder_id: int) -> None:
     """
     投递一条计划任务。
 
-    - kind=reminder：给自己发一封提醒邮件 + 站内通知（邮件失败只降级，不算失败）
+    - kind=reminder：给用户绑定的 QQ 邮箱发一封提醒邮件 + 站内通知
+      （邮件失败只降级，不算失败）；关联日程时邮件里带上日程详情
     - kind=email：把邮件真正发给收件人；失败会把状态置为 failed 并写明原因，
       这样"定时邮件没发出去"不会被当成成功
     两种都会在站内收件箱留一条记录。
@@ -404,10 +355,10 @@ async def _deliver(reminder_id: int) -> None:
         text = row.text
         remind_at = row.remind_at
         kind = row.kind or "reminder"
-        payload = _row_payload(row)
+        schedule_id = row.schedule_id or 0
+        payload = row_payload(row)
 
-    tz_name = await _user_timezone(user_id)
-    local_time = format_local(remind_at, tz_name)
+    tz_name = await user_timezone(user_id)
 
     delivered = ["in_app"]
     last_error = ""
@@ -438,19 +389,21 @@ async def _deliver(reminder_id: int) -> None:
         try:
             from .email_client_wrapper import send_self_email
 
+            subject, body = await _reminder_email(
+                text=text, schedule_id=schedule_id,
+                remind_at=remind_at, tz_name=tz_name,
+            )
             await send_self_email(
                 user_id,
-                subject=f"⏰ 提醒：{text}",
-                body=(
-                    f"你设置的提醒到点了。\n\n"
-                    f"内容：{text}\n"
-                    f"时间：{local_time}\n\n"
-                    f"—— 个人事务助理"
-                ),
+                subject=subject,
+                body=body,
             )
             delivered.insert(0, "email")
         except EmailNotConfiguredError:
-            last_error = "未配置邮箱，本次只发了站内通知"
+            last_error = (
+                "未绑定 QQ 邮箱，本次只发了站内通知。"
+                "到「集成设置 → QQ 邮箱」绑定后即可收到邮件提醒"
+            )
         except Exception as e:  # noqa: BLE001 —— 投递失败不能影响其他提醒
             last_error = f"邮件投递失败：{e}"
 
@@ -461,11 +414,71 @@ async def _deliver(reminder_id: int) -> None:
             .values(
                 # 定时邮件发失败标记为 failed，避免"看起来成功了"
                 status="failed" if failed else "fired",
-                fired_at=_now_utc(),
+                fired_at=utc_now(),
                 fired_via="+".join(delivered),
                 last_error=last_error[:500],
             )
         )
+
+
+async def _schedule_snapshot(schedule_id: int) -> dict:
+    """读一条日程的关键字段；日程不存在（已删）时返回空 dict。"""
+    if not schedule_id:
+        return {}
+    async with session_scope() as db:
+        row = (
+            await db.execute(select(Schedule).where(Schedule.id == schedule_id))
+        ).scalar_one_or_none()
+    if row is None:
+        return {}
+    return {
+        "title": row.title,
+        "start_at": row.start_at,
+        "end_at": row.end_at,
+        "location": row.location or "",
+        "description": row.description or "",
+    }
+
+
+async def _reminder_email(
+    text: str, schedule_id: int, remind_at: datetime, tz_name: str,
+) -> tuple[str, str]:
+    """
+    提醒邮件的主题与正文。
+
+    关联日程时把日程详情写进正文 —— 提醒邮件只说"该开会了"是不够用的，
+    用户往往是在手机上扫一眼邮件。
+    """
+    schedule = await _schedule_snapshot(schedule_id)
+    if not schedule:
+        return (
+            f"⏰ 提醒：{text}",
+            (
+                f"你设置的提醒到点了。\n\n"
+                f"内容：{text}\n"
+                f"提醒时间：{format_local(remind_at, tz_name)}\n\n"
+                f"—— 个人事务助理"
+            ),
+        )
+
+    lines = [
+        "你设置的日程提醒到点了。",
+        "",
+        f"日程：{schedule['title']}",
+        f"开始：{format_local(schedule['start_at'], tz_name)}",
+    ]
+    if schedule["end_at"] is not None:
+        lines.append(f"结束：{format_local(schedule['end_at'], tz_name)}")
+    if schedule["location"]:
+        lines.append(f"地点：{schedule['location']}")
+    if schedule["description"]:
+        lines.append(f"备注：{schedule['description']}")
+    lines += [
+        f"提醒时间：{format_local(remind_at, tz_name)}",
+        "",
+        "—— 个人事务助理",
+    ]
+    return f"⏰ 日程提醒：{schedule['title']}", "\n".join(lines)
 
 
 async def run_reminder_scheduler(stop_event: asyncio.Event) -> None:
