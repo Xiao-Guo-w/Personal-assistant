@@ -605,6 +605,376 @@ code {
   justify-content: space-between;
 }
 
+/* ---------------- 月历 ---------------- */
+
+.calendar-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 16px;
+  align-items: start;
+}
+
+.calendar-card {
+  gap: 0;
+  padding: 18px;
+}
+
+.calendar-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+}
+
+.calendar-month {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.calendar-month h2 {
+  font-size: 20px;
+}
+
+.calendar-nav {
+  width: 32px;
+  height: 32px;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.calendar-weekdays,
+.calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+}
+
+.calendar-weekdays {
+  border-bottom: 1px solid var(--border);
+}
+
+.calendar-weekdays span {
+  padding: 8px 6px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.calendar-day {
+  min-height: 104px;
+  padding: 7px 7px 6px;
+  border: none;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+
+.calendar-day:nth-child(7n) {
+  border-right: none;
+}
+
+.calendar-day:hover {
+  background: var(--surface-soft);
+}
+
+.calendar-day.muted {
+  color: var(--text-faint);
+}
+
+.calendar-day.today {
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+
+.calendar-day.selected {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.calendar-day-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  min-height: 22px;
+}
+
+.calendar-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.calendar-day.today .calendar-number {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.calendar-today-label {
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.calendar-events {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.calendar-event {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 3px 5px;
+  border-left: 2px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.calendar-event-time {
+  flex: none;
+  opacity: 0.75;
+}
+
+.calendar-event-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calendar-more {
+  padding-left: 6px;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.calendar-agenda {
+  gap: 14px;
+  position: sticky;
+  top: 0;
+}
+
+.agenda-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agenda-head h2 {
+  font-size: 15px;
+}
+
+.agenda-date-badge {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.agenda-empty {
+  padding: 32px 0;
+  text-align: center;
+  color: var(--text-soft);
+}
+
+.agenda-empty span {
+  display: block;
+  font-size: 28px;
+  margin-bottom: 8px;
+}
+
+.agenda-item {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr);
+  gap: 10px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.agenda-item:last-child {
+  padding-bottom: 0;
+  border-bottom: none;
+}
+
+.agenda-time {
+  padding-top: 1px;
+  color: var(--text-soft);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agenda-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.agenda-body h3 {
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.agenda-note {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.agenda-cancel {
+  align-self: flex-start;
+  padding-left: 0;
+}
+
+/* ---------------- 提醒页 ---------------- */
+
+.reminder-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.reminder-summary-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.reminder-summary-card strong {
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.reminder-summary-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: var(--surface-soft);
+  font-size: 18px;
+}
+
+.reminder-card {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.inbox-card {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.reminder-card-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--surface-soft);
+  font-size: 17px;
+}
+
+.reminder-card-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.reminder-card-title {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.reminder-card-title h3 {
+  font-size: 14px;
+  word-break: break-word;
+}
+
+.reminder-error {
+  color: var(--danger);
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.reminder-actions {
+  flex: none;
+}
+
+.reminder-confirm {
+  flex: none;
+  max-width: 220px;
+}
+
+.status-pill {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  white-space: nowrap;
+  background: var(--surface-soft);
+  color: var(--text-soft);
+}
+
+.status-pill.active {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+.status-pill.success {
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.status-pill.failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.status-pill.muted {
+  background: var(--surface-soft);
+  color: var(--text-faint);
+}
+
 /* ---------------- 导航 ---------------- */
 
 .nav {
@@ -956,6 +1326,22 @@ code {
   word-break: break-all;
 }
 
+.stack-tight {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.memory-editor {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+
+.memory-textarea {
+  resize: vertical;
+  min-height: 74px;
+  line-height: 1.55;
+}
+
 /* ---------------- 认证 / 引导 ---------------- */
 
 .auth-page,
@@ -1252,6 +1638,16 @@ code {
 
 /* ---------------- 窄屏 ---------------- */
 
+@media (max-width: 1200px) {
+  .calendar-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .calendar-agenda {
+    position: static;
+  }
+}
+
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
@@ -1265,6 +1661,20 @@ code {
 
   .main {
     height: auto;
+  }
+
+  .calendar-day {
+    min-height: 88px;
+    padding: 5px;
+  }
+
+  .calendar-event-time,
+  .calendar-today-label {
+    display: none;
+  }
+
+  .reminder-summary {
+    grid-template-columns: 1fr;
   }
 }
 

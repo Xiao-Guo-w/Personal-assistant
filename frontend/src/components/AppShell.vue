@@ -2,8 +2,6 @@
 import { onMounted } from 'vue'
 import { RouterLink, useRoute, useRouter } from 'vue-router'
 
-import ReminderPanel from '@/components/ReminderPanel.vue'
-import SchedulePanel from '@/components/SchedulePanel.vue'
 import SessionList from '@/components/SessionList.vue'
 import { pushToast } from '@/composables/useToast'
 import { authState, displayName, logout, restartOnboarding } from '@/stores/auth'
@@ -16,6 +14,8 @@ const route = useRoute()
 
 const navItems = [
   { name: 'chat', label: '聊天', icon: '💬' },
+  { name: 'schedules', label: '日程', icon: '📅' },
+  { name: 'reminders', label: '提醒', icon: '⏰' },
   { name: 'kb', label: '知识库', icon: '📚' },
   { name: 'memory', label: '长期记忆', icon: '📖' },
   { name: 'settings', label: '集成设置', icon: '⚙️' },
@@ -75,14 +75,6 @@ async function handleRestartOnboarding(): Promise<void> {
 
       <hr class="divider" />
 
-      <SchedulePanel />
-
-      <hr class="divider" />
-
-      <ReminderPanel />
-
-      <hr class="divider" />
-
       <nav class="nav">
         <RouterLink
           v-for="item in navItems"
@@ -92,7 +84,7 @@ async function handleRestartOnboarding(): Promise<void> {
           active-class="active"
         >
           <span>{{ item.icon }} {{ item.label }}</span>
-          <span v-if="item.name === 'chat' && unreadCount" class="badge">{{ unreadCount }}</span>
+          <span v-if="item.name === 'reminders' && unreadCount" class="badge">{{ unreadCount }}</span>
         </RouterLink>
       </nav>
 

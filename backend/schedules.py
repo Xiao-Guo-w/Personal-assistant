@@ -274,7 +274,8 @@ async def list_schedules(
     if wanted not in VALID_STATUSES:
         wanted = "active"
     try:
-        size = max(1, min(int(limit or 20), 50))
+        # 日历页面会一次取整月（含首尾补格），上限放宽到 1000 条
+        size = max(1, min(int(limit or 20), 1000))
     except (TypeError, ValueError):
         size = 20
 

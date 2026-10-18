@@ -2,11 +2,12 @@
 长期记忆读写 + 对用户友好的展示元数据。
 
 包含：
-- 基础读写：get_user_memories / set_user_memory（供 LLM 与写入使用）
+- 基础读写：get_user_memories / get_user_memories_for_prompt / set_user_memory
 - 展示元数据：MEMORY_KEY_META / _resolve_meta / _format_value
-- 前端接口：list_user_memories_detailed / delete_user_memory
+- 前端接口：list_user_memories_detailed / upsert_user_memory / delete_user_memory
 """
 
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -63,16 +64,24 @@ MEMORY_KEY_META: dict[str, dict] = {
 
 
 CATEGORY_ORDER = [
-    "时间与日程", "常用联系人", "沟通与邮件", "其他",
+    "时间与日程", "常用联系人", "沟通与邮件", "我的记忆", "其他",
 ]
 
+MEMORY_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
-def _resolve_meta(key: str) -> dict:
+
+def _resolve_meta(key: str, label: str = "") -> dict:
     """
     返回 key 对应的展示元数据。
 
-    优先级：精确匹配 → 通配规则 → 兜底转换。
+    优先级：用户自定义名称 → 精确匹配 → 通配规则 → 兜底转换。
     """
+    if label:
+        return {
+            "label": label, "category": "我的记忆",
+            "icon": "📝", "format": "plain",
+        }
+
     if key in MEMORY_KEY_META:
         return MEMORY_KEY_META[key]
 
@@ -128,7 +137,7 @@ def _format_value(raw: str, fmt: str) -> str:
 # ============================================================
 
 async def get_user_memories(user_id: int) -> dict[str, str]:
-    """读取用户所有偏好，返回 {key: value}。供 LLM 注入使用，不做格式化。"""
+    """读取用户所有偏好，返回 {key: value}。供按 key 取值的业务逻辑使用。"""
     async with session_scope() as db:
         result = await db.execute(
             select(UserMemory).where(UserMemory.user_id == user_id)
@@ -137,7 +146,29 @@ async def get_user_memories(user_id: int) -> dict[str, str]:
     return {row.key: row.value for row in rows}
 
 
-async def set_user_memory(user_id: int, key: str, value: str) -> None:
+async def get_user_memories_for_prompt(user_id: int) -> dict[str, str]:
+    """
+    供系统提示使用：把用户自定义名称也带进提示词。
+
+    自定义记忆的 key 是随机标识，只有 value 会丢上下文；这里输出
+    「展示名称（key）」: value，既保留用户可读语义，也保留稳定键名。
+    """
+    async with session_scope() as db:
+        result = await db.execute(
+            select(UserMemory).where(UserMemory.user_id == user_id)
+        )
+        rows = result.scalars().all()
+
+    items: dict[str, str] = {}
+    for row in rows:
+        meta = _resolve_meta(row.key, row.label or "")
+        items[f"{meta['label']}（{row.key}）"] = row.value
+    return items
+
+
+async def set_user_memory(
+    user_id: int, key: str, value: str, label: str | None = None,
+) -> None:
     """写入 / 更新用户偏好。"""
     async with session_scope() as db:
         existing = await db.execute(
@@ -149,8 +180,76 @@ async def set_user_memory(user_id: int, key: str, value: str) -> None:
         row = existing.scalar_one_or_none()
         if row:
             row.value = value
+            if label is not None:
+                row.label = label
         else:
-            db.add(UserMemory(user_id=user_id, key=key, value=value))
+            db.add(
+                UserMemory(
+                    user_id=user_id,
+                    key=key,
+                    value=value,
+                    label=label or "",
+                )
+            )
+
+
+def _serialize_memory(row: UserMemory) -> dict:
+    """ORM 对象 → 前端展示项。"""
+    meta = _resolve_meta(row.key, row.label or "")
+    updated = row.updated_at
+    if updated is not None and updated.tzinfo is None:
+        updated = updated.replace(tzinfo=timezone.utc)
+    return {
+        "key": row.key,
+        "label": meta["label"],
+        "category": meta["category"],
+        "icon": meta["icon"],
+        "raw_value": row.value,
+        "display_value": _format_value(row.value, meta["format"]),
+        "updated_at": updated.isoformat() if updated else None,
+    }
+
+
+async def upsert_user_memory(
+    user_id: int, key: str, value: str, label: str = "",
+) -> None:
+    """
+    用户从界面新增 / 修改一条长期记忆。
+
+    key 是注入模型提示词时使用的稳定标识；label 只负责展示，
+    因此自定义记忆用随机 key + 用户填写的名称。
+    """
+    clean_key = (key or "").strip()
+    if not MEMORY_KEY_RE.fullmatch(clean_key):
+        raise ValueError("记忆标识只能包含英文字母、数字、下划线、点和短横线，且不超过 64 个字符。")
+
+    clean_value = (value or "").strip()
+    if not clean_value:
+        raise ValueError("记忆内容不能为空。")
+    if len(clean_value) > 4000:
+        raise ValueError("记忆内容最多 4000 个字符。")
+
+    clean_label = (label or "").strip()
+    if len(clean_label) > 120:
+        raise ValueError("记忆名称最多 120 个字符。")
+
+    await set_user_memory(
+        user_id, clean_key, clean_value, clean_label or None,
+    )
+
+
+async def get_user_memory_detailed(user_id: int, key: str) -> dict | None:
+    """按 key 读取一条展示项，供写接口返回最新状态。"""
+    async with session_scope() as db:
+        row = (
+            await db.execute(
+                select(UserMemory).where(
+                    UserMemory.user_id == user_id,
+                    UserMemory.key == key,
+                )
+            )
+        ).scalar_one_or_none()
+    return _serialize_memory(row) if row is not None else None
 
 
 # ============================================================
@@ -169,19 +268,7 @@ async def list_user_memories_detailed(user_id: int) -> list[dict]:
 
     items: list[dict] = []
     for row in rows:
-        meta = _resolve_meta(row.key)
-        updated = row.updated_at
-        if updated is not None and updated.tzinfo is None:
-            updated = updated.replace(tzinfo=timezone.utc)
-        items.append({
-            "key": row.key,
-            "label": meta["label"],
-            "category": meta["category"],
-            "icon": meta["icon"],
-            "raw_value": row.value,
-            "display_value": _format_value(row.value, meta["format"]),
-            "updated_at": updated.isoformat() if updated else None,
-        })
+        items.append(_serialize_memory(row))
 
     def _cat_rank(item: dict) -> int:
         cat = item["category"]

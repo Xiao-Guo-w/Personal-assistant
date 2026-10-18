@@ -14,7 +14,7 @@ from langchain_core.messages import (
 )
 
 from .config import settings
-from .memory import get_user_memories
+from .memory import get_user_memories_for_prompt
 from .timeutil import DEFAULT_TZ, now_lines, time_hint
 
 _encoder = tiktoken.get_encoding("cl100k_base")
@@ -129,7 +129,7 @@ def compact_tool_result(tool_name: str, result: dict) -> dict:
 
 async def build_system_msg(user_id: int, timezone_str: str = "Asia/Shanghai") -> SystemMessage:
     """构造系统提示，注入用户偏好和时区。"""
-    memories = await get_user_memories(user_id)
+    memories = await get_user_memories_for_prompt(user_id)
     memory_block = (
         "\n".join(f"- {k}: {v}" for k, v in memories.items())
         if memories else "（暂无）"

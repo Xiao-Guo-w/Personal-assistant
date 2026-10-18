@@ -134,6 +134,8 @@ class UserMemory(Base):
     user_id: Mapped[int] = mapped_column(Integer, index=True)
     key: Mapped[str] = mapped_column(String(64))
     value: Mapped[str] = mapped_column(Text)
+    # 用户自建记忆的展示名称；为空时按 key 查内置元数据或自动生成
+    label: Mapped[str] = mapped_column(String(120), default="", server_default="")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )

@@ -75,6 +75,9 @@ def _apply_light_migrations(conn) -> None:
             "payload_json": "TEXT DEFAULT ''",
             "schedule_id": "INTEGER",
         },
+        "user_memory": {
+            "label": "VARCHAR(120) DEFAULT ''",
+        },
     }
 
     for table, columns in wanted.items():

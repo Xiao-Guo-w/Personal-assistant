@@ -83,6 +83,10 @@ export const sessionApi = {
 
 export const memoryApi = {
   list: () => http.get<MemoryItem[]>('/api/memory'),
+  save: (key: string, value: string, label = '') =>
+    http.put<MemoryItem>(`/api/memory/${encodeURIComponent(key)}`, {
+      json: { value, label },
+    }),
   remove: (key: string) => http.delete<{ ok: boolean }>(`/api/memory/${encodeURIComponent(key)}`),
 }
 
@@ -108,9 +112,9 @@ export const integrationApi = {
 
 export const scheduleApi = {
   /** 默认从现在起的有效日程；status 取 active / cancelled / all。 */
-  list: (status = 'active', limit = 20, timeMin = '') =>
+  list: (status = 'active', limit = 20, timeMin = '', timeMax = '') =>
     http.get<ScheduleListResponse>('/api/schedules', {
-      params: { status, limit, time_min: timeMin },
+      params: { status, limit, time_min: timeMin, time_max: timeMax },
     }),
   cancel: (id: number) => http.post<CancelScheduleResponse>(`/api/schedules/${id}/cancel`),
 }

@@ -21,6 +21,8 @@ const routes: RouteRecordRaw[] = [
     meta: { bare: true },
   },
   { path: '/', name: 'chat', component: () => import('@/views/ChatView.vue') },
+  { path: '/schedules', name: 'schedules', component: () => import('@/views/ScheduleView.vue') },
+  { path: '/reminders', name: 'reminders', component: () => import('@/views/ReminderView.vue') },
   { path: '/memory', name: 'memory', component: () => import('@/views/MemoryView.vue') },
   { path: '/kb', name: 'kb', component: () => import('@/views/KnowledgeView.vue') },
   { path: '/settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },

@@ -35,7 +35,12 @@ from .config import settings
 from .crypto import EncryptionError, _get_fernet
 from .db import close_db, init_db
 from .graph import close_graph, get_graph, init_graph
-from .memory import delete_user_memory, list_user_memories_detailed
+from .memory import (
+    delete_user_memory,
+    get_user_memory_detailed,
+    list_user_memories_detailed,
+    upsert_user_memory,
+)
 from .sessions import (
     assert_owned, create_session, delete_session, list_sessions, update_title,
 )
@@ -175,6 +180,12 @@ class UpdateProfileRequest(BaseModel):
 class CompleteOnboardingRequest(BaseModel):
     default_meeting_duration: int | None = None
     timezone: str | None = None
+
+
+class MemoryUpsertRequest(BaseModel):
+    """用户从长期记忆页面新增或修改一条记忆。"""
+    value: str = Field(min_length=1, max_length=4000)
+    label: str = Field(default="", max_length=120)
 
 
 # ============================================================
@@ -440,6 +451,24 @@ async def chat_stream(req: ChatRequest, user: dict = Depends(current_user)):
 async def get_memory(user: dict = Depends(current_user)):
     """查看当前用户的长期记忆（带展示元数据）。"""
     return await list_user_memories_detailed(user["id"])
+
+
+@app.put("/api/memory/{key}")
+async def save_memory(
+    key: str,
+    req: MemoryUpsertRequest,
+    user: dict = Depends(current_user),
+):
+    """新增或修改一条长期记忆。"""
+    try:
+        await upsert_user_memory(user["id"], key, req.value, req.label)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    item = await get_user_memory_detailed(user["id"], key)
+    if item is None:  # pragma: no cover - 写入后立即读取失败属于异常
+        raise HTTPException(500, "记忆保存后未能读回，请刷新重试")
+    return item
 
 
 @app.delete("/api/memory/{key}")
