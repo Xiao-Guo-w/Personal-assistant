@@ -73,7 +73,8 @@ class Settings(BaseSettings):
     embedding_model: str = ""
     # 0 表示首次调用时自动探测维度
     embedding_dim: int = 0
-    embedding_batch_size: int = 32
+    # 当前向量服务单次最多接受 20 条 input，默认值必须与之上限一致
+    embedding_batch_size: int = 20
     embedding_timeout_seconds: int = 30
     # 单条 embedding 请求失败后的重试次数（含首次）
     embedding_max_retries: int = 3
