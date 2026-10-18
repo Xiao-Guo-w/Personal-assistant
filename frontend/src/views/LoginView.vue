@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { authState, login, register } from '@/stores/auth'
+import { timezoneGroups } from '@/utils/timezone'
 
 const router = useRouter()
 const tab = ref<'login' | 'register'>('login')
@@ -13,6 +14,8 @@ const form = reactive({
   display_name: '',
   timezone: 'Asia/Shanghai',
 })
+
+const timezoneOptions = computed(() => timezoneGroups(form.timezone))
 
 async function afterLogin(): Promise<void> {
   await router.replace({ name: authState.user?.onboarded ? 'chat' : 'onboarding' })
@@ -129,7 +132,17 @@ function switchTab(next: 'login' | 'register'): void {
 
         <label class="field">
           <span class="label">时区</span>
-          <input v-model="form.timezone" class="input" placeholder="Asia/Shanghai" />
+          <select v-model="form.timezone" class="input">
+            <optgroup
+              v-for="group in timezoneOptions"
+              :key="group.label"
+              :label="group.label"
+            >
+              <option v-for="zone in group.options" :key="zone.value" :value="zone.value">
+                {{ zone.label }}
+              </option>
+            </optgroup>
+          </select>
         </label>
 
         <p v-if="authState.error" class="alert alert-error compact">{{ authState.error }}</p>

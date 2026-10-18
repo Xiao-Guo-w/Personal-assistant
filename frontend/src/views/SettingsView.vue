@@ -7,6 +7,7 @@ import { pushToast } from '@/composables/useToast'
 import { authState, updateProfile } from '@/stores/auth'
 import { refreshReminders } from '@/stores/reminders'
 import { refreshSchedules } from '@/stores/schedules'
+import { timezoneGroups } from '@/utils/timezone'
 
 type Tab = 'email' | 'account'
 
@@ -26,6 +27,7 @@ const profileTimezone = ref('')
 const savingProfile = ref(false)
 
 const email = computed(() => status.value?.email)
+const profileTimezoneGroups = computed(() => timezoneGroups(profileTimezone.value))
 
 onMounted(async () => {
   await loadStatus()
@@ -192,7 +194,18 @@ async function saveProfile(): Promise<void> {
 
         <label class="field">
           <span class="label">时区</span>
-          <input v-model="profileTimezone" class="input" placeholder="Asia/Shanghai" />
+          <select v-model="profileTimezone" class="input">
+            <optgroup
+              v-for="group in profileTimezoneGroups"
+              :key="group.label"
+              :label="group.label"
+            >
+              <option v-for="zone in group.options" :key="zone.value" :value="zone.value">
+                {{ zone.label }}
+              </option>
+            </optgroup>
+          </select>
+          <span class="muted small">日程和提醒的时间会按这个时区显示与换算。</span>
         </label>
 
         <button type="button" class="btn btn-primary" :disabled="savingProfile" @click="saveProfile">

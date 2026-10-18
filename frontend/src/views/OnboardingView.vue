@@ -6,19 +6,9 @@ import { errorMessage, integrationApi } from '@/api'
 import type { IntegrationStatus } from '@/api/types'
 import { authState, completeOnboarding, displayName, refreshMe } from '@/stores/auth'
 import { createSession } from '@/stores/chat'
+import { timezoneGroups } from '@/utils/timezone'
 
 const router = useRouter()
-
-const TIMEZONES = [
-  'Asia/Shanghai',
-  'Asia/Tokyo',
-  'Asia/Singapore',
-  'America/New_York',
-  'America/Los_Angeles',
-  'Europe/London',
-  'Europe/Berlin',
-  'UTC',
-]
 
 const DURATIONS = [30, 60, 90, 120]
 
@@ -31,6 +21,7 @@ const busy = ref(false)
 const error = ref('')
 
 const progress = computed(() => `${(step.value / (total - 1)) * 100}%`)
+const timezoneOptions = computed(() => timezoneGroups(timezone.value))
 
 onMounted(() => {
   void loadStatus()
@@ -106,7 +97,15 @@ async function finish(skipPreferences = false): Promise<void> {
         <label class="field">
           <span class="label">你的时区</span>
           <select v-model="timezone" class="input">
-            <option v-for="zone in TIMEZONES" :key="zone" :value="zone">{{ zone }}</option>
+            <optgroup
+              v-for="group in timezoneOptions"
+              :key="group.label"
+              :label="group.label"
+            >
+              <option v-for="zone in group.options" :key="zone.value" :value="zone.value">
+                {{ zone.label }}
+              </option>
+            </optgroup>
           </select>
         </label>
 

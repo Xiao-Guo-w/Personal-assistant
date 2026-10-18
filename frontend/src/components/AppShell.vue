@@ -8,6 +8,7 @@ import { authState, displayName, logout, restartOnboarding } from '@/stores/auth
 import { chatState, createSession, loadSessions, openSession, resetChat } from '@/stores/chat'
 import { resetReminders, unreadCount } from '@/stores/reminders'
 import { resetSchedules } from '@/stores/schedules'
+import { timezoneShortLabel } from '@/utils/timezone'
 
 const router = useRouter()
 const route = useRoute()
@@ -63,7 +64,7 @@ async function handleRestartOnboarding(): Promise<void> {
       <div class="user-card">
         <div class="user-name">👤 {{ displayName }}</div>
         <div class="user-meta">
-          @{{ authState.user?.username }} · {{ authState.user?.timezone }}
+          @{{ authState.user?.username }} · {{ timezoneShortLabel(authState.user?.timezone) }}
         </div>
       </div>
 
